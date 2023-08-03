@@ -1,4 +1,3 @@
-#!/usr/bin/python
 # -*- coding: utf-8 -*-
 
 # Copyright: (c) 2014, Brian Coca <briancoca+ansible@gmail.com>
@@ -16,14 +15,42 @@ description:
      - Configure a .deb package using debconf-set-selections.
      - Or just query existing selections.
 version_added: "1.6"
+extends_documentation_fragment:
+- action_common_attributes
+attributes:
+    check_mode:
+        support: full
+    diff_mode:
+        support: full
+    platform:
+        support: full
+        platforms: debian
 notes:
     - This module requires the command line debconf tools.
     - A number of questions have to be answered (depending on the package).
       Use 'debconf-show <package>' on any Debian or derivative with the package
       installed to see questions/settings available.
     - Some distros will always record tasks involving the setting of passwords as changed. This is due to debconf-get-selections masking passwords.
-    - It is highly recommended to add I(no_log=True) to task while handling sensitive information using this module.
-    - Supports C(check_mode).
+    - It is highly recommended to add C(no_log=True) to task while handling sensitive information using this module.
+    - The debconf module does not reconfigure packages, it just updates the debconf database.
+      An additional step is needed (typically with C(notify) if debconf makes a change)
+      to reconfigure the package and apply the changes.
+      debconf is extensively used for pre-seeding configuration prior to installation
+      rather than modifying configurations.
+      So, while dpkg-reconfigure does use debconf data, it is not always authoritative
+      and you may need to check how your package is handled.
+    - Also note dpkg-reconfigure is a 3-phase process. It invokes the
+      control scripts from the C(/var/lib/dpkg/info) directory with the
+      C(<package>.prerm  reconfigure <version>),
+      C(<package>.config reconfigure <version>) and C(<package>.postinst control <version>) arguments.
+    - The main issue is that the C(<package>.config reconfigure) step for many packages
+      will first reset the debconf database (overriding changes made by this module) by
+      checking the on-disk configuration. If this is the case for your package then
+      dpkg-reconfigure will effectively ignore changes  made by debconf.
+    - However as dpkg-reconfigure only executes the C(<package>.config) step if the file
+      exists, it is possible to rename it to C(/var/lib/dpkg/info/<package>.config.ignore)
+      before executing C(dpkg-reconfigure -f noninteractive <package>) and then restore it.
+      This seems to be compliant with Debian policy for the .config file.
 requirements:
 - debconf
 - debconf-utils
@@ -42,8 +69,8 @@ options:
   vtype:
     description:
       - The type of the value supplied.
-      - It is highly recommended to add I(no_log=True) to task while specifying I(vtype=password).
-      - C(seen) was added in Ansible 2.2.
+      - It is highly recommended to add C(no_log=True) to task while specifying O(vtype=password).
+      - V(seen) was added in Ansible 2.2.
     type: str
     choices: [ boolean, error, multiselect, note, password, seen, select, string, text, title ]
   value:
@@ -97,7 +124,7 @@ EXAMPLES = r'''
 
 RETURN = r'''#'''
 
-from ansible.module_utils._text import to_text
+from ansible.module_utils.common.text.converters import to_text
 from ansible.module_utils.basic import AnsibleModule
 
 

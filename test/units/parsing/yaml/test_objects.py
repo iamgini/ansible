@@ -24,7 +24,7 @@ from units.compat import unittest
 
 from ansible.errors import AnsibleError
 
-from ansible.module_utils._text import to_native
+from ansible.module_utils.common.text.converters import to_native
 
 from ansible.parsing import vault
 from ansible.parsing.yaml.loader import AnsibleLoader
@@ -52,7 +52,7 @@ class TestAnsibleVaultUnicodeNoVault(unittest.TestCase, YamlTestUtils):
         self.assertIsInstance(avu, objects.AnsibleVaultEncryptedUnicode)
         self.assertTrue(avu.vault is None)
         # AnsibleVaultEncryptedUnicode without a vault should never == any string
-        self.assertNotEquals(avu, seq)
+        self.assertNotEqual(avu, seq)
 
     def assert_values(self, seq):
         avu = objects.AnsibleVaultEncryptedUnicode(seq)
@@ -104,11 +104,6 @@ class TestAnsibleVaultEncryptedUnicode(unittest.TestCase, YamlTestUtils):
     def _from_plaintext(self, seq):
         id_secret = vault.match_encrypt_secret(self.good_vault_secrets)
         return objects.AnsibleVaultEncryptedUnicode.from_plaintext(seq, vault=self.vault, secret=id_secret[1])
-
-    def _from_ciphertext(self, ciphertext):
-        avu = objects.AnsibleVaultEncryptedUnicode(ciphertext)
-        avu.vault = self.vault
-        return avu
 
     def test_empty_init(self):
         self.assertRaises(TypeError, objects.AnsibleVaultEncryptedUnicode)

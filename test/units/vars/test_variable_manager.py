@@ -22,7 +22,7 @@ __metaclass__ = type
 import os
 
 from units.compat import unittest
-from units.compat.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch
 from ansible.inventory.manager import InventoryManager
 from ansible.module_utils.six import iteritems
 from ansible.playbook.play import Play
@@ -141,10 +141,8 @@ class TestVariableManager(unittest.TestCase):
         return
 
         # pylint: disable=unreachable
-        '''
-        Tests complex variations and combinations of get_vars() with different
-        objects to modify the context under which variables are merged.
-        '''
+        # Tests complex variations and combinations of get_vars() with different
+        # objects to modify the context under which variables are merged.
         # FIXME: BCS makethiswork
         # return True
 

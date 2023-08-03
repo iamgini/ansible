@@ -9,14 +9,15 @@ import sys
 
 from ansible.module_utils.six import PY3, string_types
 from ansible.module_utils.compat.importlib import import_module
+from ansible.modules import ping as ping_module
 from ansible.utils.collection_loader import AnsibleCollectionConfig, AnsibleCollectionRef
 from ansible.utils.collection_loader._collection_finder import (
     _AnsibleCollectionFinder, _AnsibleCollectionLoader, _AnsibleCollectionNSPkgLoader, _AnsibleCollectionPkgLoader,
-    _AnsibleCollectionPkgLoaderBase, _AnsibleCollectionRootPkgLoader, _AnsiblePathHookFinder,
+    _AnsibleCollectionPkgLoaderBase, _AnsibleCollectionRootPkgLoader, _AnsibleNSTraversable, _AnsiblePathHookFinder,
     _get_collection_name_from_path, _get_collection_role_path, _get_collection_metadata, _iter_modules_impl
 )
 from ansible.utils.collection_loader._collection_config import _EventSource
-from units.compat.mock import MagicMock, NonCallableMagicMock, patch
+from unittest.mock import MagicMock, NonCallableMagicMock, patch
 
 
 # fixture to ensure we always clean up the import stuff when we're done
@@ -26,6 +27,35 @@ def teardown(*args, **kwargs):
     reset_collections_loader_state()
 
 # BEGIN STANDALONE TESTS - these exercise behaviors of the individual components without the import machinery
+
+
+@pytest.mark.filterwarnings(
+    'ignore:'
+    r'find_module\(\) is deprecated and slated for removal in Python 3\.12; use find_spec\(\) instead'
+    ':DeprecationWarning',
+    'ignore:'
+    r'FileFinder\.find_loader\(\) is deprecated and slated for removal in Python 3\.12; use find_spec\(\) instead'
+    ':DeprecationWarning',
+)
+@pytest.mark.skipif(not PY3 or sys.version_info >= (3, 12), reason='Testing Python 2 codepath (find_module) on Python 3, <= 3.11')
+def test_find_module_py3_lt_312():
+    dir_to_a_file = os.path.dirname(ping_module.__file__)
+    path_hook_finder = _AnsiblePathHookFinder(_AnsibleCollectionFinder(), dir_to_a_file)
+
+    # setuptools may fall back to find_module on Python 3 if find_spec returns None
+    # see https://github.com/pypa/setuptools/pull/2918
+    assert path_hook_finder.find_spec('missing') is None
+    assert path_hook_finder.find_module('missing') is None
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason='Testing Python 2 codepath (find_module) on Python >= 3.12')
+def test_find_module_py3_gt_311():
+    dir_to_a_file = os.path.dirname(ping_module.__file__)
+    path_hook_finder = _AnsiblePathHookFinder(_AnsibleCollectionFinder(), dir_to_a_file)
+
+    # setuptools may fall back to find_module on Python 3 if find_spec returns None
+    # see https://github.com/pypa/setuptools/pull/2918
+    assert path_hook_finder.find_spec('missing') is None
 
 
 def test_finder_setup():
@@ -814,6 +844,53 @@ def test_collectionref_components_invalid(name, subdirs, resource, ref_type, exp
         AnsibleCollectionRef(name, subdirs, resource, ref_type)
 
     assert re.search(expected_error_expression, str(curerr.value))
+
+
+@pytest.mark.skipif(not PY3, reason='importlib.resources only supported for py3')
+def test_importlib_resources():
+    if sys.version_info < (3, 10):
+        from importlib_resources import files
+    else:
+        from importlib.resources import files
+    from pathlib import Path
+
+    f = get_default_finder()
+    reset_collections_loader_state(f)
+
+    ansible_collections_ns = files('ansible_collections')
+    ansible_ns = files('ansible_collections.ansible')
+    testns = files('ansible_collections.testns')
+    testcoll = files('ansible_collections.testns.testcoll')
+    testcoll2 = files('ansible_collections.testns.testcoll2')
+    module_utils = files('ansible_collections.testns.testcoll.plugins.module_utils')
+
+    assert isinstance(ansible_collections_ns, _AnsibleNSTraversable)
+    assert isinstance(ansible_ns, _AnsibleNSTraversable)
+    assert isinstance(testcoll, Path)
+    assert isinstance(module_utils, Path)
+
+    assert ansible_collections_ns.is_dir()
+    assert ansible_ns.is_dir()
+    assert testcoll.is_dir()
+    assert module_utils.is_dir()
+
+    first_path = Path(default_test_collection_paths[0])
+    second_path = Path(default_test_collection_paths[1])
+    testns_paths = []
+    ansible_ns_paths = []
+    for path in default_test_collection_paths[:2]:
+        ansible_ns_paths.append(Path(path) / 'ansible_collections' / 'ansible')
+        testns_paths.append(Path(path) / 'ansible_collections' / 'testns')
+
+    assert testns._paths == testns_paths
+    # NOTE: The next two asserts check for subsets to accommodate running the unit tests when externally installed collections are available.
+    assert set(ansible_ns_paths).issubset(ansible_ns._paths)
+    assert set(Path(p) / 'ansible_collections' for p in default_test_collection_paths[:2]).issubset(ansible_collections_ns._paths)
+    assert testcoll2 == second_path / 'ansible_collections' / 'testns' / 'testcoll2'
+
+    assert {p.name for p in module_utils.glob('*.py')} == {'__init__.py', 'my_other_util.py', 'my_util.py'}
+    nestcoll_mu_init = first_path / 'ansible_collections' / 'testns' / 'testcoll' / 'plugins' / 'module_utils' / '__init__.py'
+    assert next(module_utils.glob('__init__.py')) == nestcoll_mu_init
 
 
 # BEGIN TEST SUPPORT

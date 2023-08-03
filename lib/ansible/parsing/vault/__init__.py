@@ -54,12 +54,10 @@ except ImportError:
 
 from ansible.errors import AnsibleError, AnsibleAssertionError
 from ansible import constants as C
-from ansible.module_utils.six import PY3, binary_type
-# Note: on py2, this zip is izip not the list based zip() builtin
-from ansible.module_utils.six.moves import zip
-from ansible.module_utils._text import to_bytes, to_text, to_native
+from ansible.module_utils.six import binary_type
+from ansible.module_utils.common.text.converters import to_bytes, to_text, to_native
 from ansible.utils.display import Display
-from ansible.utils.path import makedirs_safe
+from ansible.utils.path import makedirs_safe, unfrackpath
 
 display = Display()
 
@@ -351,17 +349,25 @@ def script_is_client(filename):
 
 
 def get_file_vault_secret(filename=None, vault_id=None, encoding=None, loader=None):
-    this_path = os.path.realpath(os.path.expanduser(filename))
+    ''' Get secret from file content or execute file and get secret from stdout '''
 
+    # we unfrack but not follow the full path/context to possible vault script
+    # so when the script uses 'adjacent' file for configuration or similar
+    # it still works (as inventory scripts often also do).
+    # while files from --vault-password-file are already unfracked, other sources are not
+    this_path = unfrackpath(filename, follow=False)
     if not os.path.exists(this_path):
         raise AnsibleError("The vault password file %s was not found" % this_path)
 
+    # it is a script?
     if loader.is_executable(this_path):
+
         if script_is_client(filename):
-            display.vvvv(u'The vault password file %s is a client script.' % to_text(filename))
+            # this is special script type that handles vault ids
+            display.vvvv(u'The vault password file %s is a client script.' % to_text(this_path))
             # TODO: pass vault_id_name to script via cli
-            return ClientScriptVaultSecret(filename=this_path, vault_id=vault_id,
-                                           encoding=encoding, loader=loader)
+            return ClientScriptVaultSecret(filename=this_path, vault_id=vault_id, encoding=encoding, loader=loader)
+
         # just a plain vault password script. No args, returns a byte array
         return ScriptVaultSecret(filename=this_path, encoding=encoding, loader=loader)
 
@@ -400,9 +406,8 @@ class FileVaultSecret(VaultSecret):
 
         # TODO: replace with use of self.loader
         try:
-            f = open(filename, "rb")
-            vault_pass = f.read().strip()
-            f.close()
+            with open(filename, "rb") as f:
+                vault_pass = f.read().strip()
         except (OSError, IOError) as e:
             raise AnsibleError("Could not read vault password file %s: %s" % (filename, e))
 
@@ -435,8 +440,7 @@ class ScriptVaultSecret(FileVaultSecret):
         vault_pass = stdout.strip(b'\r\n')
 
         empty_password_msg = 'Invalid vault password was provided from script (%s)' % filename
-        verify_secret_is_not_empty(vault_pass,
-                                   msg=empty_password_msg)
+        verify_secret_is_not_empty(vault_pass, msg=empty_password_msg)
 
         return vault_pass
 
@@ -580,7 +584,7 @@ class VaultLib:
     def is_encrypted(vaulttext):
         return is_encrypted(vaulttext)
 
-    def encrypt(self, plaintext, secret=None, vault_id=None):
+    def encrypt(self, plaintext, secret=None, vault_id=None, salt=None):
         """Vault encrypt a piece of data.
 
         :arg plaintext: a text or byte string to encrypt.
@@ -618,7 +622,7 @@ class VaultLib:
         else:
             display.vvvvv(u'Encrypting without a vault_id using vault secret %s' % to_text(secret))
 
-        b_ciphertext = this_cipher.encrypt(b_plaintext, secret)
+        b_ciphertext = this_cipher.encrypt(b_plaintext, secret, salt)
 
         # format the data for output to the file
         b_vaulttext = format_vaulttext_envelope(b_ciphertext,
@@ -654,7 +658,10 @@ class VaultLib:
         b_vaulttext = to_bytes(vaulttext, errors='strict', encoding='utf-8')
 
         if self.secrets is None:
-            raise AnsibleVaultError("A vault password must be specified to decrypt data")
+            msg = "A vault password must be specified to decrypt data"
+            if filename:
+                msg += " in file %s" % to_native(filename)
+            raise AnsibleVaultError(msg)
 
         if not is_encrypted(b_vaulttext):
             msg = "input is not vault encrypted data. "
@@ -662,8 +669,7 @@ class VaultLib:
                 msg += "%s is not a vault encrypted file" % to_native(filename)
             raise AnsibleError(msg)
 
-        b_vaulttext, dummy, cipher_name, vault_id = parse_vaulttext_envelope(b_vaulttext,
-                                                                             filename=filename)
+        b_vaulttext, dummy, cipher_name, vault_id = parse_vaulttext_envelope(b_vaulttext, filename=filename)
 
         # create the cipher object, note that the cipher used for decrypt can
         # be different than the cipher used for encrypt
@@ -781,13 +787,13 @@ class VaultEditor:
 
             passes = 3
             with open(tmp_path, "wb") as fh:
-                for _ in range(passes):
+                for dummy in range(passes):
                     fh.seek(0, 0)
                     # get a random chunk of data, each pass with other length
                     chunk_len = random.randint(max_chunk_len // 2, max_chunk_len)
                     data = os.urandom(chunk_len)
 
-                    for _ in range(0, file_len // chunk_len):
+                    for dummy in range(0, file_len // chunk_len):
                         fh.write(data)
                     fh.write(data[:file_len % chunk_len])
 
@@ -1015,10 +1021,7 @@ class VaultEditor:
 
         try:
             if filename == '-':
-                if PY3:
-                    data = sys.stdin.buffer.read()
-                else:
-                    data = sys.stdin.read()
+                data = sys.stdin.buffer.read()
             else:
                 with open(filename, "rb") as fh:
                     data = fh.read()
@@ -1123,7 +1126,7 @@ class VaultEditor:
             os.chown(dest, prev.st_uid, prev.st_gid)
 
     def _editor_shell_command(self, filename):
-        env_editor = os.environ.get('EDITOR', 'vi')
+        env_editor = C.config.get_config_value('EDITOR')
         editor = shlex.split(env_editor)
         editor.append(filename)
 
@@ -1196,10 +1199,25 @@ class VaultAES256:
         return to_bytes(hexlify(b_hmac), errors='surrogate_or_strict'), hexlify(b_ciphertext)
 
     @classmethod
-    def encrypt(cls, b_plaintext, secret):
+    def _get_salt(cls):
+        custom_salt = C.config.get_config_value('VAULT_ENCRYPT_SALT')
+        if not custom_salt:
+            custom_salt = os.urandom(32)
+        return to_bytes(custom_salt)
+
+    @classmethod
+    def encrypt(cls, b_plaintext, secret, salt=None):
+
         if secret is None:
             raise AnsibleVaultError('The secret passed to encrypt() was None')
-        b_salt = os.urandom(32)
+
+        if salt is None:
+            b_salt = cls._get_salt()
+        elif not salt:
+            raise AnsibleVaultError('Empty or invalid salt passed to encrypt()')
+        else:
+            b_salt = to_bytes(salt)
+
         b_password = secret.bytes
         b_key1, b_key2, b_iv = cls._gen_key_initctr(b_password, b_salt)
 
@@ -1250,10 +1268,7 @@ class VaultAES256:
 
         result = 0
         for b_x, b_y in zip(b_a, b_b):
-            if PY3:
-                result |= b_x ^ b_y
-            else:
-                result |= ord(b_x) ^ ord(b_y)
+            result |= b_x ^ b_y
         return result == 0
 
     @classmethod

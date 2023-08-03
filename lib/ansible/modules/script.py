@@ -11,8 +11,8 @@ module: script
 version_added: "0.9"
 short_description: Runs a local script on a remote node after transferring it
 description:
-  - The C(script) module takes the script name followed by a list of space-delimited arguments.
-  - Either a free form command or C(cmd) parameter is required, see the examples.
+  - The M(ansible.builtin.script) module takes the script name followed by a list of space-delimited arguments.
+  - Either a free form command or O(cmd) parameter is required, see the examples.
   - The local script at path will be transferred to the remote node and then executed.
   - The given script will be processed through the shell environment on the remote node.
   - This module does not require python on the remote system, much like the M(ansible.builtin.raw) module.
@@ -43,11 +43,13 @@ options:
     version_added: "2.6"
 notes:
   - It is usually preferable to write Ansible modules rather than pushing scripts. Convert your script to an Ansible module for bonus points!
-  - The C(ssh) connection plugin will force pseudo-tty allocation via C(-tt) when scripts are executed. Pseudo-ttys do not have a stderr channel and all
-    stderr is sent to stdout. If you depend on separated stdout and stderr result keys, please switch to a copy+command set of tasks instead of using script.
+  - The P(ansible.builtin.ssh#connection) connection plugin will force pseudo-tty allocation via C(-tt) when scripts are executed.
+    Pseudo-ttys do not have a stderr channel and all stderr is sent to stdout. If you depend on separated stdout and stderr result keys,
+    please switch to a copy+command set of tasks instead of using script.
   - If the path to the local script contains spaces, it needs to be quoted.
   - This module is also supported for Windows targets.
-  - Does not support C(check_mode).
+  - If the script returns non UTF-8 data, it must be encoded to avoid issues. One option is to pipe
+    the output through C(base64).
 seealso:
   - module: ansible.builtin.shell
   - module: ansible.windows.win_shell
@@ -55,7 +57,25 @@ author:
   - Ansible Core Team
   - Michael DeHaan
 extends_documentation_fragment:
-  - decrypt
+    - action_common_attributes
+    - action_common_attributes.files
+    - action_common_attributes.raw
+    - decrypt
+attributes:
+    check_mode:
+        support: partial
+        details: while the script itself is arbitrary and cannot be subject to the check mode semantics it adds O(creates)/O(removes) options as a workaround
+    diff_mode:
+        support: none
+    platform:
+        details: This action is one of the few that requires no Python on the remote as it passes the command directly into the connection string
+        platforms: all
+    raw:
+      support: full
+    safe_file_operations:
+        support: none
+    vault:
+        support: full
 '''
 
 EXAMPLES = r'''
@@ -85,4 +105,7 @@ EXAMPLES = r'''
   ansible.builtin.script: /some/local/script.py
   args:
     executable: python3
+
+- name: Run a Powershell script on a windows host
+  script: subdirectories/under/path/with/your/playbook/script.ps1
 '''

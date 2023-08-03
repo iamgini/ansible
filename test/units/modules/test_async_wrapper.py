@@ -7,14 +7,10 @@ __metaclass__ = type
 import os
 import json
 import shutil
+import sys
 import tempfile
 
-import pytest
-
-from units.compat.mock import patch, MagicMock
 from ansible.modules import async_wrapper
-
-from pprint import pprint
 
 
 class TestAsyncWrapper:
@@ -22,11 +18,10 @@ class TestAsyncWrapper:
     def test_run_module(self, monkeypatch):
 
         def mock_get_interpreter(module_path):
-            return ['/usr/bin/python']
+            return [sys.executable]
 
         module_result = {'rc': 0}
         module_lines = [
-            '#!/usr/bin/python',
             'import sys',
             'sys.stderr.write("stderr stuff")',
             "print('%s')" % json.dumps(module_result)

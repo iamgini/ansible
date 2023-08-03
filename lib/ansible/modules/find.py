@@ -1,4 +1,3 @@
-#!/usr/bin/python
 # -*- coding: utf-8 -*-
 
 # Copyright: (c) 2014, Ruggero Marchei <ruggero.marchei@daemonzone.net>
@@ -20,6 +19,9 @@ short_description: Return a list of files based on specific criteria
 description:
     - Return a list of files based on specific criteria. Multiple criteria are AND'd together.
     - For Windows targets, use the M(ansible.windows.win_find) module instead.
+    - This module does not use the C(find) command, it is a much simpler and slower Python implementation.
+      It is intended for small and simple uses. Those that need the extra power or speed and have expertise
+      with the UNIX command, should use it directly.
 options:
     age:
         description:
@@ -31,24 +33,24 @@ options:
     patterns:
         default: []
         description:
-            - One or more (shell or regex) patterns, which type is controlled by C(use_regex) option.
+            - One or more (shell or regex) patterns, which type is controlled by O(use_regex) option.
             - The patterns restrict the list of files to be returned to those whose basenames match at
               least one of the patterns specified. Multiple patterns can be specified using a list.
             - The pattern is matched against the file base name, excluding the directory.
             - When using regexen, the pattern MUST match the ENTIRE file name, not just parts of it. So
-              if you are looking to match all files ending in .default, you'd need to use '.*\.default'
-              as a regexp and not just '\.default'.
+              if you are looking to match all files ending in .default, you'd need to use C(.*\.default)
+              as a regexp and not just C(\.default).
             - This parameter expects a list, which can be either comma separated or YAML. If any of the
               patterns contain a comma, make sure to put them in a list to avoid splitting the patterns
               in undesirable ways.
-            - Defaults to '*' when C(use_regex=False), or '.*' when C(use_regex=True).
+            - Defaults to V(*) when O(use_regex=False), or V(.*) when O(use_regex=True).
         type: list
         aliases: [ pattern ]
         elements: str
     excludes:
         description:
-            - One or more (shell or regex) patterns, which type is controlled by C(use_regex) option.
-            - Items whose basenames match an C(excludes) pattern are culled from C(patterns) matches.
+            - One or more (shell or regex) patterns, which type is controlled by O(use_regex) option.
+            - Items whose basenames match an O(excludes) pattern are culled from O(patterns) matches.
               Multiple patterns can be specified using a list.
         type: list
         aliases: [ exclude ]
@@ -57,14 +59,17 @@ options:
     contains:
         description:
             - A regular expression or pattern which should be matched against the file content.
-            - Works only when I(file_type) is C(file).
+            - If O(read_whole_file) is V(true) it matches against the beginning of the line (uses
+              V(re.match(\))). If O(read_whole_file) is V(false), it searches anywhere for that pattern
+              (uses V(re.search(\))).
+            - Works only when O(file_type) is V(file).
         type: str
     read_whole_file:
         description:
             - When doing a C(contains) search, determines whether the whole file should be read into
               memory or if the regex should be applied to the file line-by-line.
             - Setting this to C(true) can have performance and memory implications for large files.
-            - This uses C(re.search()) instead of C(re.match()).
+            - This uses V(re.search(\)) instead of V(re.match(\)).
         type: bool
         default: false
         version_added: "2.11"
@@ -103,32 +108,41 @@ options:
         default: mtime
     hidden:
         description:
-            - Set this to C(yes) to include hidden files, otherwise they will be ignored.
+            - Set this to V(true) to include hidden files, otherwise they will be ignored.
         type: bool
         default: no
     follow:
         description:
-            - Set this to C(yes) to follow symlinks in path for systems with python 2.6+.
+            - Set this to V(true) to follow symlinks in path for systems with python 2.6+.
         type: bool
         default: no
     get_checksum:
         description:
-            - Set this to C(yes) to retrieve a file's SHA1 checksum.
+            - Set this to V(true) to retrieve a file's SHA1 checksum.
         type: bool
         default: no
     use_regex:
         description:
-            - If C(no), the patterns are file globs (shell).
-            - If C(yes), they are python regexes.
+            - If V(false), the patterns are file globs (shell).
+            - If V(true), they are python regexes.
         type: bool
         default: no
     depth:
         description:
             - Set the maximum number of levels to descend into.
-            - Setting recurse to C(no) will override this value, which is effectively depth 1.
+            - Setting recurse to V(false) will override this value, which is effectively depth 1.
             - Default is unlimited depth.
         type: int
         version_added: "2.6"
+extends_documentation_fragment: action_common_attributes
+attributes:
+    check_mode:
+        details: since this action does not modify the target it just executes normally during check mode
+        support: full
+    diff_mode:
+        support: none
+    platform:
+        platforms: posix
 seealso:
 - module: ansible.windows.win_find
 '''
@@ -136,41 +150,41 @@ seealso:
 
 EXAMPLES = r'''
 - name: Recursively find /tmp files older than 2 days
-  find:
+  ansible.builtin.find:
     paths: /tmp
     age: 2d
     recurse: yes
 
 - name: Recursively find /tmp files older than 4 weeks and equal or greater than 1 megabyte
-  find:
+  ansible.builtin.find:
     paths: /tmp
     age: 4w
     size: 1m
     recurse: yes
 
 - name: Recursively find /var/tmp files with last access time greater than 3600 seconds
-  find:
+  ansible.builtin.find:
     paths: /var/tmp
     age: 3600
     age_stamp: atime
     recurse: yes
 
 - name: Find /var/log files equal or greater than 10 megabytes ending with .old or .log.gz
-  find:
+  ansible.builtin.find:
     paths: /var/log
     patterns: '*.old,*.log.gz'
     size: 10m
 
 # Note that YAML double quotes require escaping backslashes but yaml single quotes do not.
 - name: Find /var/log files equal or greater than 10 megabytes ending with .old or .log.gz via regex
-  find:
+  ansible.builtin.find:
     paths: /var/log
     patterns: "^.*?\\.(?:old|log\\.gz)$"
     size: 10m
     use_regex: yes
 
 - name: Find /var/log all directories, exclude nginx and mysql
-  find:
+  ansible.builtin.find:
     paths: /var/log
     recurse: no
     file_type: directory
@@ -178,14 +192,14 @@ EXAMPLES = r'''
 
 # When using patterns that contain a comma, make sure they are formatted as lists to avoid splitting the pattern
 - name: Use a single pattern that contains a comma formatted as a list
-  find:
+  ansible.builtin.find:
     paths: /var/log
     file_type: file
     use_regex: yes
     patterns: ['^_[0-9]{2,4}_.*.log$']
 
 - name: Use multiple patterns that contain a comma formatted as a YAML list
-  find:
+  ansible.builtin.find:
     paths: /var/log
     file_type: file
     use_regex: yes
@@ -236,7 +250,7 @@ import re
 import stat
 import time
 
-from ansible.module_utils._text import to_text, to_native
+from ansible.module_utils.common.text.converters import to_text, to_native
 from ansible.module_utils.basic import AnsibleModule
 
 
@@ -283,9 +297,9 @@ def agefilter(st, now, age, timestamp):
     '''filter files older than age'''
     if age is None:
         return True
-    elif age >= 0 and now - st.__getattribute__("st_%s" % timestamp) >= abs(age):
+    elif age >= 0 and now - getattr(st, "st_%s" % timestamp) >= abs(age):
         return True
-    elif age < 0 and now - st.__getattribute__("st_%s" % timestamp) <= abs(age):
+    elif age < 0 and now - getattr(st, "st_%s" % timestamp) <= abs(age):
         return True
     return False
 
@@ -460,7 +474,7 @@ def main():
                         depth = int(fsname.count(os.path.sep)) - int(wpath.count(os.path.sep)) + 1
                         if depth > params['depth']:
                             # Empty the list used by os.walk to avoid traversing deeper unnecessarily
-                            del(dirs[:])
+                            del dirs[:]
                             continue
                     if os.path.basename(fsname).startswith('.') and not params['hidden']:
                         continue
@@ -512,8 +526,8 @@ def main():
                 if not params['recurse']:
                     break
         except Exception as e:
-            module.warn("Skipped '%s' path due to this access issue: %s\n" % (npath, to_text(e)))
             skipped[npath] = to_text(e)
+            module.warn("Skipped '%s' path due to this access issue: %s\n" % (to_text(npath), skipped[npath]))
             has_warnings = True
 
     if has_warnings:

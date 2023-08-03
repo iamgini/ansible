@@ -1,17 +1,20 @@
-#!/usr/bin/env python
-from __future__ import (absolute_import, division, print_function)
-__metaclass__ = type
+from __future__ import annotations
 
 import contextlib
 import fnmatch
 import glob
 import os
+import pathlib
 import re
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+
+import packaging.version
+
+from ansible.release import __version__
 
 
 def assemble_files_to_ship(complete_file_list):
@@ -25,71 +28,31 @@ def assemble_files_to_ship(complete_file_list):
         '.github/*',
         '.github/*/*',
         'changelogs/fragments/*',
-        'hacking/backport/*',
-        'hacking/azp/*',
-        'hacking/tests/*',
-        'hacking/ticket_stubs/*',
-        'test/sanity/code-smell/botmeta.*',
-        'test/utils/*',
-        'test/utils/*/*',
-        'test/utils/*/*/*',
+        'hacking/*',
+        'hacking/*/*',
+        'test/results/.tmp/*',
+        'test/results/.tmp/*/*',
+        'test/results/.tmp/*/*/*',
+        'test/results/.tmp/*/*/*/*',
+        'test/results/.tmp/*/*/*/*/*',
         '.git*',
     )
     ignore_files = frozenset((
         # Developer-only tools
+        'changelogs/README.md',
         'changelogs/config.yaml',
-        'hacking/README.md',
-        'hacking/ansible-profile',
-        'hacking/cgroup_perf_recap_graph.py',
-        'hacking/create_deprecated_issues.py',
-        'hacking/deprecated_issue_template.md',
-        'hacking/fix_test_syntax.py',
-        'hacking/get_library.py',
-        'hacking/metadata-tool.py',
-        'hacking/report.py',
-        'hacking/return_skeleton_generator.py',
-        'hacking/test-module',
-        'hacking/test-module.py',
-        'test/support/README.md',
         '.cherry_picker.toml',
         '.mailmap',
-        # Generated as part of a build step
-        'docs/docsite/rst/conf.py',
-        'docs/docsite/rst/index.rst',
-        # Possibly should be included
-        'examples/scripts/uptime.py',
-        'examples/scripts/my_test.py',
-        'examples/scripts/my_test_info.py',
-        'examples/scripts/my_test_facts.py',
-        'examples/DOCUMENTATION.yml',
-        'examples/play.yml',
-        'examples/hosts.yaml',
-        'examples/hosts.yml',
-        'examples/inventory_script_schema.json',
-        'examples/plugin_filters.yml',
-        'hacking/env-setup',
-        'hacking/env-setup.fish',
-        'MANIFEST',
     ))
 
     # These files are generated and then intentionally added to the sdist
 
-    # Manpages
-    manpages = ['docs/man/man1/ansible.1']
-    for dirname, dummy, files in os.walk('bin'):
-        for filename in files:
-            path = os.path.join(dirname, filename)
-            if os.path.islink(path):
-                if os.readlink(path) == 'ansible':
-                    manpages.append('docs/man/man1/%s.1' % filename)
-
     # Misc
     misc_generated_files = [
-        'SYMLINK_CACHE.json',
         'PKG-INFO',
     ]
 
-    shipped_files = manpages + misc_generated_files
+    shipped_files = misc_generated_files
 
     for path in complete_file_list:
         if path not in ignore_files:
@@ -106,7 +69,9 @@ def assemble_files_to_install(complete_file_list):
     """
     This looks for all of the files which should show up in an installation of ansible
     """
-    ignore_patterns = tuple()
+    ignore_patterns = (
+        # Tests excluded from sdist
+    )
 
     pkg_data_files = []
     for path in complete_file_list:
@@ -132,7 +97,7 @@ def clean_repository(file_list):
     """Copy the repository to clean it of artifacts"""
     # Create a tempdir that will be the clean repo
     with tempfile.TemporaryDirectory() as repo_root:
-        directories = set((repo_root + os.path.sep,))
+        directories = {repo_root + os.path.sep}
 
         for filename in file_list:
             # Determine if we need to create the directory
@@ -157,17 +122,24 @@ def clean_repository(file_list):
 
 def create_sdist(tmp_dir):
     """Create an sdist in the repository"""
-    create = subprocess.Popen(
-        ['make', 'snapshot', 'SDIST_DIR=%s' % tmp_dir],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
+    # Make sure a changelog exists for this version when testing from devel.
+    # When testing from a stable branch the changelog will already exist.
+    version = packaging.version.Version(__version__)
+    pathlib.Path(f'changelogs/CHANGELOG-v{version.major}.{version.minor}.rst').touch()
+
+    create = subprocess.run(
+        [sys.executable, '-m', 'build', '--sdist', '--no-isolation', '--outdir', tmp_dir],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
-    stderr = create.communicate()[1]
+    stderr = create.stderr
+    stdout = create.stdout
 
     if create.returncode != 0:
-        raise Exception('make snapshot failed:\n%s' % stderr)
+        raise Exception('make snapshot failed:\n%s' % stderr + '\n' + stdout)
 
     # Determine path to sdist
     tmp_dir_files = os.listdir(tmp_dir)
@@ -205,22 +177,24 @@ def extract_sdist(sdist_path, tmp_dir):
 
 def install_sdist(tmp_dir, sdist_dir):
     """Install the extracted sdist into the temporary directory"""
-    install = subprocess.Popen(
+    install = subprocess.run(
         ['python', 'setup.py', 'install', '--root=%s' % tmp_dir],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
         cwd=os.path.join(tmp_dir, sdist_dir),
+        check=False,
     )
 
-    stdout, stderr = install.communicate()
+    stdout, stderr = install.stdout, install.stderr
 
     if install.returncode != 0:
         raise Exception('sdist install failed:\n%s' % stderr)
 
     # Determine the prefix for the installed files
-    match = re.search('^creating (%s/.*?/(?:site|dist)-packages)/ansible$' %
+    match = re.search('^copying .* -> (%s/.*?/(?:site|dist)-packages)/ansible$' %
                       tmp_dir, stdout, flags=re.M)
+
     return match.group(1)
 
 
@@ -252,10 +226,17 @@ def check_sdist_files_are_wanted(sdist_dir, to_ship_files):
             dirname = ''
 
         for filename in files:
+            if filename == 'setup.cfg':
+                continue
+
             path = os.path.join(dirname, filename)
             if path not in to_ship_files:
+
                 if fnmatch.fnmatch(path, 'changelogs/CHANGELOG-v2.[0-9]*.rst'):
                     # changelog files are expected
+                    continue
+
+                if fnmatch.fnmatch(path, 'lib/ansible_core.egg-info/*'):
                     continue
 
                 # FIXME: ansible-test doesn't pass the paths of symlinks to us so we aren't
@@ -278,7 +259,7 @@ def check_installed_contains_expected(install_dir, to_install_files):
 
 
 EGG_RE = re.compile('ansible[^/]+\\.egg-info/(PKG-INFO|SOURCES.txt|'
-                    'dependency_links.txt|not-zip-safe|requires.txt|top_level.txt)$')
+                    'dependency_links.txt|not-zip-safe|requires.txt|top_level.txt|entry_points.txt)$')
 
 
 def check_installed_files_are_wanted(install_dir, to_install_files):
@@ -318,33 +299,12 @@ def check_installed_files_are_wanted(install_dir, to_install_files):
     return results
 
 
-def _find_symlinks():
-    symlink_list = []
-    for dirname, directories, filenames in os.walk('.'):
-        for filename in filenames:
-            path = os.path.join(dirname, filename)
-            # Strip off "./" from the front
-            path = path[2:]
-            if os.path.islink(path):
-                symlink_list.append(path)
-
-    return symlink_list
-
-
 def main():
     """All of the files in the repository"""
-    complete_file_list = []
-    for path in sys.argv[1:] or sys.stdin.read().splitlines():
-        complete_file_list.append(path)
+    complete_file_list = sys.argv[1:] or sys.stdin.read().splitlines()
 
-    # ansible-test isn't currently passing symlinks to us so construct those ourselves for now
-    for filename in _find_symlinks():
-        if filename not in complete_file_list:
-            # For some reason ansible-test is passing us lib/ansible/module_utils/ansible_release.py
-            # which is a symlink even though it doesn't pass any others
-            complete_file_list.append(filename)
-
-    # We may run this after docs sanity tests so get a clean repository to run in
+    # Limit visible files to those reported by ansible-test.
+    # This avoids including files which are not committed to git.
     with clean_repository(complete_file_list) as clean_repo_dir:
         os.chdir(clean_repo_dir)
 

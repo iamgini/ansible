@@ -2,7 +2,7 @@
 # Copyright (c) 2017 Ansible Project
 # GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
 
-from __future__ import (absolute_import, division, print_function)
+from __future__ import (annotations, absolute_import, division, print_function)
 __metaclass__ = type
 
 DOCUMENTATION = """
@@ -12,7 +12,7 @@ DOCUMENTATION = """
     description:
         - Run commands or put/fetch on a target via WinRM
         - This plugin allows extra arguments to be passed that are supported by the protocol but not explicitly defined here.
-          They should take the form of variables declared with the following pattern `ansible_winrm_<option>`.
+          They should take the form of variables declared with the following pattern C(ansible_winrm_<option>).
     version_added: "2.0"
     extends_documentation_fragment:
         - connection_pipelining
@@ -25,6 +25,7 @@ DOCUMENTATION = """
             - Address of the windows machine
         default: inventory_hostname
         vars:
+            - name: inventory_hostname
             - name: ansible_host
             - name: ansible_winrm_host
         type: str
@@ -34,9 +35,11 @@ DOCUMENTATION = """
         vars:
             - name: ansible_user
             - name: ansible_winrm_user
+        keyword:
+            - name: remote_user
         type: str
       remote_password:
-        description: Authentication password for the C(remote_user). Can be supplied as CLI option.
+        description: Authentication password for the O(remote_user). Can be supplied as CLI option.
         vars:
             - name: ansible_password
             - name: ansible_winrm_pass
@@ -52,12 +55,14 @@ DOCUMENTATION = """
           - name: ansible_port
           - name: ansible_winrm_port
         default: 5986
+        keyword:
+            - name: port
         type: integer
       scheme:
         description:
             - URI scheme to use
-            - If not set, then will default to C(https) or C(http) if I(port) is
-              C(5985).
+            - If not set, then will default to V(https) or V(http) if O(port) is
+              V(5985).
         choices: [http, https]
         vars:
           - name: ansible_winrm_scheme
@@ -74,6 +79,7 @@ DOCUMENTATION = """
            - If None (the default) the plugin will try to automatically guess the correct list
            - The choices available depend on your version of pywinrm
         type: list
+        elements: string
         vars:
           - name: ansible_winrm_transport
       kerberos_command:
@@ -92,13 +98,28 @@ DOCUMENTATION = """
         vars:
           - name: ansible_winrm_kinit_args
         version_added: '2.11'
+      kinit_env_vars:
+        description:
+        - A list of environment variables to pass through to C(kinit) when getting the Kerberos authentication ticket.
+        - By default no environment variables are passed through and C(kinit) is run with a blank slate.
+        - The environment variable C(KRB5CCNAME) cannot be specified here as it's used to store the temp Kerberos
+          ticket used by WinRM.
+        type: list
+        elements: str
+        default: []
+        ini:
+        - section: winrm
+          key: kinit_env_vars
+        vars:
+          - name: ansible_winrm_kinit_env_vars
+        version_added: '2.12'
       kerberos_mode:
         description:
             - kerberos usage mode.
             - The managed option means Ansible will obtain kerberos ticket.
             - While the manual one means a ticket must already have been obtained by the user.
             - If having issues with Ansible freezing when trying to obtain the
-              Kerberos ticket, you can either set this to C(manual) and obtain
+              Kerberos ticket, you can either set this to V(manual) and obtain
               it outside Ansible or install C(pexpect) through pip and try
               again.
         choices: [managed, manual]
@@ -107,8 +128,29 @@ DOCUMENTATION = """
         type: str
       connection_timeout:
         description:
-            - Sets the operation and read timeout settings for the WinRM
+            - Despite its name, sets both the 'operation' and 'read' timeout settings for the WinRM
               connection.
+            - The operation timeout belongs to the WS-Man layer and runs on the winRM-service on the
+              managed windows host.
+            - The read timeout belongs to the underlying python Request call (http-layer) and runs
+              on the ansible controller.
+            - The operation timeout sets the WS-Man 'Operation timeout' that runs on the managed
+              windows host. The operation timeout specifies how long a command will run on the
+              winRM-service before it sends the message 'WinRMOperationTimeoutError' back to the
+              client. The client (silently) ignores this message and starts a new instance of the
+              operation timeout, waiting for the command to finish (long running commands).
+            - The read timeout sets the client HTTP-request timeout and specifies how long the
+              client (ansible controller) will wait for data from the server to come back over
+              the HTTP-connection (timeout for waiting for in-between messages from the server).
+              When this timer expires, an exception will be thrown and the ansible connection
+              will be terminated with the error message 'Read timed out'
+            - To avoid the above exception to be thrown, the read timeout will be set to 10
+              seconds higher than the WS-Man operation timeout, thus make the connection more
+              robust on networks with long latency and/or many hops between server and client
+              network wise.
+            - Setting the difference bewteen the operation and the read timeout to 10 seconds
+              alligns it to the defaults used in the winrm-module and the PSRP-module which also
+              uses 10 seconds (30 seconds for read timeout and 20 seconds for operation timeout)
             - Corresponds to the C(operation_timeout_sec) and
               C(read_timeout_sec) args in pywinrm so avoid setting these vars
               with this one.
@@ -128,10 +170,14 @@ import json
 import tempfile
 import shlex
 import subprocess
+import typing as t
+
+from inspect import getfullargspec
+from urllib.parse import urlunsplit
 
 HAVE_KERBEROS = False
 try:
-    import kerberos
+    import kerberos  # pylint: disable=unused-import
     HAVE_KERBEROS = True
 except ImportError:
     pass
@@ -141,20 +187,14 @@ from ansible.errors import AnsibleError, AnsibleConnectionFailure
 from ansible.errors import AnsibleFileNotFound
 from ansible.module_utils.json_utils import _filter_non_json_lines
 from ansible.module_utils.parsing.convert_bool import boolean
-from ansible.module_utils.six.moves.urllib.parse import urlunsplit
-from ansible.module_utils._text import to_bytes, to_native, to_text
-from ansible.module_utils.six import binary_type, PY3
+from ansible.module_utils.common.text.converters import to_bytes, to_native, to_text
+from ansible.module_utils.six import binary_type
 from ansible.plugins.connection import ConnectionBase
 from ansible.plugins.shell.powershell import _parse_clixml
+from ansible.plugins.shell.powershell import ShellBase as PowerShellBase
 from ansible.utils.hashing import secure_hash
 from ansible.utils.display import Display
 
-# getargspec is deprecated in favour of getfullargspec in Python 3 but
-# getfullargspec is not available in Python 2
-if PY3:
-    from inspect import getfullargspec as getargspec
-else:
-    from inspect import getargspec
 
 try:
     import winrm
@@ -162,6 +202,7 @@ try:
     from winrm.protocol import Protocol
     import requests.exceptions
     HAS_WINRM = True
+    WINRM_IMPORT_ERR = None
 except ImportError as e:
     HAS_WINRM = False
     WINRM_IMPORT_ERR = e
@@ -169,6 +210,7 @@ except ImportError as e:
 try:
     import xmltodict
     HAS_XMLTODICT = True
+    XMLTODICT_IMPORT_ERR = None
 except ImportError as e:
     HAS_XMLTODICT = False
     XMLTODICT_IMPORT_ERR = e
@@ -180,7 +222,7 @@ try:
     # we can only use pexpect for kerb auth if echo is a valid kwarg
     # https://github.com/ansible/ansible/issues/43462
     if hasattr(pexpect, 'spawn'):
-        argspec = getargspec(pexpect.spawn.__init__)
+        argspec = getfullargspec(pexpect.spawn.__init__)
         if 'echo' in argspec.args:
             HAS_PEXPECT = True
 except ImportError as e:
@@ -205,14 +247,15 @@ class Connection(ConnectionBase):
     has_pipelining = True
     allow_extras = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: t.Any, **kwargs: t.Any) -> None:
 
         self.always_pipeline_modules = True
         self.has_native_async = True
 
-        self.protocol = None
-        self.shell_id = None
+        self.protocol: winrm.Protocol | None = None
+        self.shell_id: str | None = None
         self.delegate = None
+        self._shell: PowerShellBase
         self._shell_type = 'powershell'
 
         super(Connection, self).__init__(*args, **kwargs)
@@ -222,7 +265,7 @@ class Connection(ConnectionBase):
             logging.getLogger('requests_kerberos').setLevel(logging.INFO)
             logging.getLogger('urllib3').setLevel(logging.INFO)
 
-    def _build_winrm_kwargs(self):
+    def _build_winrm_kwargs(self) -> None:
         # this used to be in set_options, as win_reboot needs to be able to
         # override the conn timeout, we need to be able to build the args
         # after setting individual options. This is called by _connect before
@@ -277,13 +320,13 @@ class Connection(ConnectionBase):
             self._kerb_managed = False
 
         # arg names we're going passing directly
-        internal_kwarg_mask = set(['self', 'endpoint', 'transport', 'username', 'password', 'scheme', 'path', 'kinit_mode', 'kinit_cmd'])
+        internal_kwarg_mask = {'self', 'endpoint', 'transport', 'username', 'password', 'scheme', 'path', 'kinit_mode', 'kinit_cmd'}
 
         self._winrm_kwargs = dict(username=self._winrm_user, password=self._winrm_pass)
-        argspec = getargspec(Protocol.__init__)
+        argspec = getfullargspec(Protocol.__init__)
         supported_winrm_args = set(argspec.args)
         supported_winrm_args.update(internal_kwarg_mask)
-        passed_winrm_args = set([v.replace('ansible_winrm_', '') for v in self.get_option('_extras')])
+        passed_winrm_args = {v.replace('ansible_winrm_', '') for v in self.get_option('_extras')}
         unsupported_args = passed_winrm_args.difference(supported_winrm_args)
 
         # warn for kwargs unsupported by the installed version of pywinrm
@@ -296,7 +339,7 @@ class Connection(ConnectionBase):
 
     # Until pykerberos has enough goodies to implement a rudimentary kinit/klist, simplest way is to let each connection
     # auth itself with a private CCACHE.
-    def _kerb_auth(self, principal, password):
+    def _kerb_auth(self, principal: str, password: str) -> None:
         if password is None:
             password = ""
 
@@ -304,7 +347,13 @@ class Connection(ConnectionBase):
         display.vvvvv("creating Kerberos CC at %s" % self._kerb_ccache.name)
         krb5ccname = "FILE:%s" % self._kerb_ccache.name
         os.environ["KRB5CCNAME"] = krb5ccname
-        krb5env = dict(KRB5CCNAME=krb5ccname)
+        krb5env = dict(PATH=os.environ["PATH"], KRB5CCNAME=krb5ccname)
+
+        # Add any explicit environment vars into the krb5env block
+        kinit_env_vars = self.get_option('kinit_env_vars')
+        for var in kinit_env_vars:
+            if var not in krb5env and var in os.environ:
+                krb5env[var] = os.environ[var]
 
         # Stores various flags to call with kinit, these could be explicit args set by 'ansible_winrm_kinit_args' OR
         # '-f' if kerberos delegation is requested (ansible_winrm_kerberos_delegation).
@@ -355,8 +404,8 @@ class Connection(ConnectionBase):
             rc = child.exitstatus
         else:
             proc_mechanism = "subprocess"
-            password = to_bytes(password, encoding='utf-8',
-                                errors='surrogate_or_strict')
+            b_password = to_bytes(password, encoding='utf-8',
+                                  errors='surrogate_or_strict')
 
             display.vvvv("calling kinit with subprocess for principal %s"
                          % principal)
@@ -371,7 +420,7 @@ class Connection(ConnectionBase):
                           "'%s': %s" % (self._kinit_cmd, to_native(err))
                 raise AnsibleConnectionFailure(err_msg)
 
-            stdout, stderr = p.communicate(password + b'\n')
+            stdout, stderr = p.communicate(b_password + b'\n')
             rc = p.returncode != 0
 
         if rc != 0:
@@ -386,7 +435,7 @@ class Connection(ConnectionBase):
 
         display.vvvvv("kinit succeeded for principal %s" % principal)
 
-    def _winrm_connect(self):
+    def _winrm_connect(self) -> winrm.Protocol:
         '''
         Establish a WinRM connection over HTTP/HTTPS.
         '''
@@ -418,7 +467,7 @@ class Connection(ConnectionBase):
                 winrm_kwargs = self._winrm_kwargs.copy()
                 if self._winrm_connection_timeout:
                     winrm_kwargs['operation_timeout_sec'] = self._winrm_connection_timeout
-                    winrm_kwargs['read_timeout_sec'] = self._winrm_connection_timeout + 1
+                    winrm_kwargs['read_timeout_sec'] = self._winrm_connection_timeout + 10
                 protocol = Protocol(endpoint, transport=transport, **winrm_kwargs)
 
                 # open the shell from connect so we know we're able to talk to the server
@@ -445,7 +494,7 @@ class Connection(ConnectionBase):
         else:
             raise AnsibleError('No transport found for WinRM connection')
 
-    def _winrm_send_input(self, protocol, shell_id, command_id, stdin, eof=False):
+    def _winrm_send_input(self, protocol: winrm.Protocol, shell_id: str, command_id: str, stdin: bytes, eof: bool = False) -> None:
         rq = {'env:Envelope': protocol._get_soap_header(
             resource_uri='http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd',
             action='http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Send',
@@ -459,7 +508,13 @@ class Connection(ConnectionBase):
             stream['@End'] = 'true'
         protocol.send_message(xmltodict.unparse(rq))
 
-    def _winrm_exec(self, command, args=(), from_exec=False, stdin_iterator=None):
+    def _winrm_exec(
+        self,
+        command: str,
+        args: t.Iterable[bytes] = (),
+        from_exec: bool = False,
+        stdin_iterator: t.Iterable[tuple[bytes, bool]] = None,
+    ) -> winrm.Response:
         if not self.protocol:
             self.protocol = self._winrm_connect()
             self._connected = True
@@ -521,7 +576,7 @@ class Connection(ConnectionBase):
             if command_id:
                 self.protocol.cleanup_command(self.shell_id, command_id)
 
-    def _connect(self):
+    def _connect(self) -> Connection:
 
         if not HAS_WINRM:
             raise AnsibleError("winrm or requests is not installed: %s" % to_native(WINRM_IMPORT_ERR))
@@ -535,20 +590,20 @@ class Connection(ConnectionBase):
             self._connected = True
         return self
 
-    def reset(self):
+    def reset(self) -> None:
         if not self._connected:
             return
         self.protocol = None
         self.shell_id = None
         self._connect()
 
-    def _wrapper_payload_stream(self, payload, buffer_size=200000):
+    def _wrapper_payload_stream(self, payload: bytes, buffer_size: int = 200000) -> t.Iterable[tuple[bytes, bool]]:
         payload_bytes = to_bytes(payload)
         byte_count = len(payload_bytes)
         for i in range(0, byte_count, buffer_size):
             yield payload_bytes[i:i + buffer_size], i + buffer_size >= byte_count
 
-    def exec_command(self, cmd, in_data=None, sudoable=True):
+    def exec_command(self, cmd: str, in_data: bytes | None = None, sudoable: bool = True) -> tuple[int, bytes, bytes]:
         super(Connection, self).exec_command(cmd, in_data=in_data, sudoable=sudoable)
         cmd_parts = self._shell._encode_script(cmd, as_list=True, strict_mode=False, preserve_rc=False)
 
@@ -576,7 +631,7 @@ class Connection(ConnectionBase):
         return (result.status_code, result.std_out, result.std_err)
 
     # FUTURE: determine buffer size at runtime via remote winrm config?
-    def _put_file_stdin_iterator(self, in_path, out_path, buffer_size=250000):
+    def _put_file_stdin_iterator(self, in_path: str, out_path: str, buffer_size: int = 250000) -> t.Iterable[tuple[bytes, bool]]:
         in_size = os.path.getsize(to_bytes(in_path, errors='surrogate_or_strict'))
         offset = 0
         with open(to_bytes(in_path, errors='surrogate_or_strict'), 'rb') as in_file:
@@ -589,9 +644,9 @@ class Connection(ConnectionBase):
                 yield b64_data, (in_file.tell() == in_size)
 
             if offset == 0:  # empty file, return an empty buffer + eof to close it
-                yield "", True
+                yield b"", True
 
-    def put_file(self, in_path, out_path):
+    def put_file(self, in_path: str, out_path: str) -> None:
         super(Connection, self).put_file(in_path, out_path)
         out_path = self._shell._unquote(out_path)
         display.vvv('PUT "%s" TO "%s"' % (in_path, out_path), host=self._winrm_host)
@@ -654,7 +709,7 @@ class Connection(ConnectionBase):
         if not remote_sha1 == local_sha1:
             raise AnsibleError("Remote sha1 hash {0} does not match local hash {1}".format(to_native(remote_sha1), to_native(local_sha1)))
 
-    def fetch_file(self, in_path, out_path):
+    def fetch_file(self, in_path: str, out_path: str) -> None:
         super(Connection, self).fetch_file(in_path, out_path)
         in_path = self._shell._unquote(in_path)
         out_path = out_path.replace('\\', '/')
@@ -668,7 +723,7 @@ class Connection(ConnectionBase):
                 try:
                     script = '''
                         $path = '%(path)s'
-                        If (Test-Path -Path $path -PathType Leaf)
+                        If (Test-Path -LiteralPath $path -PathType Leaf)
                         {
                             $buffer_size = %(buffer_size)d
                             $offset = %(offset)d
@@ -683,7 +738,7 @@ class Connection(ConnectionBase):
                             }
                             $stream.Close() > $null
                         }
-                        ElseIf (Test-Path -Path $path -PathType Container)
+                        ElseIf (Test-Path -LiteralPath $path -PathType Container)
                         {
                             Write-Host "[DIR]";
                         }
@@ -721,7 +776,7 @@ class Connection(ConnectionBase):
             if out_file:
                 out_file.close()
 
-    def close(self):
+    def close(self) -> None:
         if self.protocol and self.shell_id:
             display.vvvvv('WINRM CLOSE SHELL: %s' % self.shell_id, host=self._winrm_host)
             self.protocol.close_shell(self.shell_id)

@@ -5,7 +5,7 @@
 from __future__ import absolute_import, division, print_function
 __metaclass__ = type
 
-import ansible.module_utils.common.warnings as warnings
+from ansible.module_utils.common import warnings
 
 from ansible.module_utils.common.arg_spec import ModuleArgumentSpecValidator, ValidationResult
 
@@ -49,7 +49,7 @@ def test_module_alias_deprecations_warnings(monkeypatch):
         {
             'collection_name': None,
             'date': '2020-03-04',
-            'name': 'flamethrower',
+            'msg': "Alias 'flamethrower' is deprecated. See the module docs for more information",
             'version': None,
         }
     ]

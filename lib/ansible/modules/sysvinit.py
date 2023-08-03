@@ -1,4 +1,3 @@
-#!/usr/bin/python
 # -*- coding: utf-8 -*-
 # (c) 2017, Brian Coca <bcoca@ansible.com>
 # (c) 2017, Adam Miller <admiller@redhat.com>
@@ -27,8 +26,8 @@ options:
     state:
         choices: [ 'started', 'stopped', 'restarted', 'reloaded' ]
         description:
-            - C(started)/C(stopped) are idempotent actions that will not run commands unless necessary.
-              Not all init scripts support C(restarted) nor C(reloaded) natively, so these will both trigger a stop and start as needed.
+            - V(started)/V(stopped) are idempotent actions that will not run commands unless necessary.
+              Not all init scripts support V(restarted) nor V(reloaded) natively, so these will both trigger a stop and start as needed.
         type: str
     enabled:
         type: bool
@@ -37,7 +36,7 @@ options:
     sleep:
         default: 1
         description:
-            - If the service is being C(restarted) or C(reloaded) then sleep this many seconds between the stop and start command.
+            - If the service is being V(restarted) or V(reloaded) then sleep this many seconds between the stop and start command.
               This helps to workaround badly behaving services.
         type: int
     pattern:
@@ -66,21 +65,30 @@ options:
               tty or the service dying when the task is over as the connection
               closes the session.
         default: no
+extends_documentation_fragment: action_common_attributes
+attributes:
+    check_mode:
+        support: full
+    diff_mode:
+        support: none
+    platform:
+        platforms: posix
 notes:
     - One option other than name is required.
+    - The service names might vary by specific OS/distribution
 requirements:
     - That the service managed has a corresponding init script.
 '''
 
 EXAMPLES = '''
 - name: Make sure apache2 is started
-  sysvinit:
+  ansible.builtin.sysvinit:
       name: apache2
       state: started
       enabled: yes
 
 - name: Make sure apache2 is started on runlevels 3 and 5
-  sysvinit:
+  ansible.builtin.sysvinit:
       name: apache2
       state: started
       enabled: yes
@@ -94,24 +102,29 @@ results:
     description: results from actions taken
     returned: always
     type: complex
-    sample: {
-            "attempts": 1,
-            "changed": true,
-            "name": "apache2",
-            "status": {
-                "enabled": {
-                    "changed": true,
-                    "rc": 0,
-                    "stderr": "",
-                    "stdout": ""
-                },
-                "stopped": {
-                    "changed": true,
-                    "rc": 0,
-                    "stderr": "",
-                    "stdout": "Stopping web server: apache2.\n"
-                }
-            }
+    contains:
+      name:
+        description: Name of the service
+        type: str
+        returned: always
+        sample: "apache2"
+      status:
+        description: Status of the service
+        type: dict
+        returned: changed
+        sample: {
+          "enabled": {
+             "changed": true,
+             "rc": 0,
+             "stderr": "",
+             "stdout": ""
+          },
+          "stopped": {
+             "changed": true,
+             "rc": 0,
+             "stderr": "",
+             "stdout": "Stopping web server: apache2.\n"
+          }
         }
 '''
 

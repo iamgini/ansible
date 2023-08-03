@@ -76,13 +76,6 @@
     - ansible_facts["distribution_major_version"] == "7"
     - ansible_facts["distribution"] == "RedHat"
   block:
-    # Need to enable this RHUI repo for RHEL7 testing in AWS, CentOS has Extras
-    # enabled by default and this is not needed there.
-    - name: enable rhel-7-server-rhui-extras-rpms repo for RHEL7
-      command: yum-config-manager --enable rhel-7-server-rhui-extras-rpms
-    - name: update cache to pull repodata
-      yum:
-        update_cache: yes
     - name: install required packages for buildah test
       yum:
         state: present
@@ -109,6 +102,25 @@
             - "yum_result.rc == 0"
             - "yum_result.changed"
             - "rpm_result.rc == 0"
+    - name: remove python before another test
+      yum:
+        name: 'python'
+        state: absent
+        installroot: "{{ buildah_mount.stdout }}"
+        releasever: "{{ buildah_host_releasever.stdout }}"
+    - name: test yum install of python using releasever with latest
+      yum:
+        name: 'python'
+        state: latest
+        installroot: "{{ buildah_mount.stdout }}"
+        releasever: "{{ buildah_host_releasever.stdout }}"
+      register: yum_result
+    - name: verify installation of python
+      assert:
+        that:
+            - "yum_result.rc == 0"
+            - "yum_result.changed"
+            - "rpm_result.rc == 0"
   always:
     - name: remove buildah container
       command: "buildah rm yum_installroot_releasever_test"
@@ -118,5 +130,3 @@
         state: absent
         name:
           - buildah
-    - name: disable rhel-7-server-rhui-extras-rpms repo for RHEL7
-      command: yum-config-manager --disable rhel-7-server-rhui-extras-rpms

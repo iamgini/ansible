@@ -1,4 +1,3 @@
-#!/usr/bin/python
 # -*- coding: utf-8 -*-
 
 # Copyright:  Ansible Project
@@ -23,26 +22,18 @@ options:
     description:
       - The name of the imported playbook is specified directly without any other option.
 extends_documentation_fragment:
-- action_common_attributes
+  - action_common_attributes
+  - action_common_attributes.conn
+  - action_common_attributes.flow
+  - action_core
+  - action_core.import
 attributes:
-    async:
-        support: none
-    become:
-        support: none
-    bypass_host_loop:
+    check_mode:
         support: full
-    conditional:
+    diff_mode:
         support: none
-    connection:
-        support: none
-    delegation:
-        support: none
-    loops:
-        support: none
-    tags:
-        support: none
-    until:
-        support: none
+    platform:
+        platforms: all
 notes:
   - This is a core feature of Ansible, rather than a module, and cannot be overridden like a module.
 seealso:
@@ -57,25 +48,28 @@ seealso:
 EXAMPLES = r'''
 - hosts: localhost
   tasks:
-    - debug:
+    - ansible.builtin.debug:
         msg: play1
 
 - name: Include a play after another play
-  import_playbook: otherplays.yaml
+  ansible.builtin.import_playbook: otherplays.yaml
 
 - name: Set variables on an imported playbook
-  import_playbook: otherplays.yml
+  ansible.builtin.import_playbook: otherplays.yml
   vars:
     service: httpd
+
+- name: Include a playbook from a collection
+  ansible.builtin.import_playbook: my_namespace.my_collection.my_playbook
 
 - name: This DOES NOT WORK
   hosts: all
   tasks:
-    - debug:
+    - ansible.builtin.debug:
         msg: task1
 
     - name: This fails because I'm inside a play already
-      import_playbook: stuff.yaml
+      ansible.builtin.import_playbook: stuff.yaml
 '''
 
 RETURN = r'''

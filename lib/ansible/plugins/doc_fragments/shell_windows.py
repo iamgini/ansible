@@ -9,13 +9,13 @@ class ModuleDocFragment(object):
     # Windows shell documentation fragment
     # FIXME: set_module_language don't belong here but must be set so they don't fail when someone
     #  get_option('set_module_language') on this plugin
-    DOCUMENTATION = """
+    DOCUMENTATION = r"""
 options:
   async_dir:
     description:
     - Directory in which ansible will keep async job information.
-    - Before Ansible 2.8, this was set to C(remote_tmp + "\\.ansible_async").
-    default: '%USERPROFILE%\\.ansible_async'
+    - Before Ansible 2.8, this was set to C(remote_tmp + "\.ansible_async").
+    default: '%USERPROFILE%\.ansible_async'
     ini:
     - section: powershell
       key: async_dir
@@ -35,7 +35,7 @@ options:
     description:
     - Controls if we set the locale for modules when executing on the
       target.
-    - Windows only supports C(no) as an option.
+    - Windows only supports V(no) as an option.
     type: bool
     default: 'no'
     choices: ['no', False]
@@ -43,6 +43,9 @@ options:
     description:
     - List of dictionaries of environment variables and their values to use when
       executing commands.
+    keyword:
+      - name: environment
     type: list
+    elements: dictionary
     default: [{}]
 """

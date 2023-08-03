@@ -8,7 +8,7 @@ DOCUMENTATION = """
     name: ini
     author: Yannig Perre (!UNKNOWN) <yannig.perre(at)gmail.com>
     version_added: "2.0"
-    short_description: read data from a ini file
+    short_description: read data from an ini file
     description:
       - "The ini lookup reads the contents of a file in INI format C(key1=value1).
         This plugin retrieves the value on the right side after the equal sign C('=') of a given section C([section])."
@@ -39,22 +39,36 @@ DOCUMENTATION = """
         default: ''
       case_sensitive:
         description:
-          Whether key names read from C(file) should be case sensitive. This prevents
+          Whether key names read from O(file) should be case sensitive. This prevents
           duplicate key errors if keys only differ in case.
         default: False
         version_added: '2.12'
+      allow_no_value:
+        description:
+        - Read an ini file which contains key without value and without '=' symbol.
+        type: bool
+        default: False
+        aliases: ['allow_none']
+        version_added: '2.12'
+    seealso:
+      - ref: playbook_task_paths
+        description: Search paths used for relative files.
 """
 
 EXAMPLES = """
-- debug: msg="User in integration is {{ lookup('ini', 'user', section='integration', file='users.ini') }}"
+- ansible.builtin.debug: msg="User in integration is {{ lookup('ansible.builtin.ini', 'user', section='integration', file='users.ini') }}"
 
-- debug: msg="User in production  is {{ lookup('ini', 'user', section='production',  file='users.ini') }}"
+- ansible.builtin.debug: msg="User in production  is {{ lookup('ansible.builtin.ini', 'user', section='production',  file='users.ini') }}"
 
-- debug: msg="user.name is {{ lookup('ini', 'user.name', type='properties', file='user.properties') }}"
+- ansible.builtin.debug: msg="user.name is {{ lookup('ansible.builtin.ini', 'user.name', type='properties', file='user.properties') }}"
 
-- debug:
+- ansible.builtin.debug:
     msg: "{{ item }}"
-  loop: "{{q('ini', '.*', section='section1', file='test.ini', re=True)}}"
+  loop: "{{ q('ansible.builtin.ini', '.*', section='section1', file='test.ini', re=True) }}"
+
+- name: Read an ini file with allow_no_value
+  ansible.builtin.debug:
+    msg: "{{ lookup('ansible.builtin.ini', 'user', file='mysql.ini', section='mysqld', allow_no_value=True) }}"
 """
 
 RETURN = """
@@ -65,16 +79,16 @@ _raw:
   elements: str
 """
 
+import configparser
 import os
 import re
 
 from io import StringIO
 from collections import defaultdict
+from collections.abc import MutableSequence
 
 from ansible.errors import AnsibleLookupError, AnsibleOptionsError
-from ansible.module_utils.six.moves import configparser
-from ansible.module_utils._text import to_text, to_native
-from ansible.module_utils.common._collections_compat import MutableSequence
+from ansible.module_utils.common.text.converters import to_text, to_native
 from ansible.plugins.lookup import LookupBase
 
 
@@ -127,7 +141,7 @@ class LookupModule(LookupBase):
         self.set_options(var_options=variables, direct=kwargs)
         paramvals = self.get_options()
 
-        self.cp = configparser.ConfigParser()
+        self.cp = configparser.ConfigParser(allow_no_value=paramvals.get('allow_no_value', paramvals.get('allow_none')))
         if paramvals['case_sensitive']:
             self.cp.optionxform = to_native
 

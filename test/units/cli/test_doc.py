@@ -5,6 +5,7 @@ __metaclass__ = type
 import pytest
 
 from ansible.cli.doc import DocCLI, RoleMixin
+from ansible.plugins.loader import module_loader, init_plugin_loader
 
 
 TTY_IFY_DATA = {
@@ -28,9 +29,9 @@ TTY_IFY_DATA = {
     'L(the user guide, https://docs.ansible.com/)': 'the user guide <https://docs.ansible.com/>',
     'R(the user guide, user-guide)': 'the user guide',
     # de-rsty refs and anchors
-    'yolo :ref:`my boy` does stuff': 'yolo website for `my boy` does stuff',
-    '.. seealso:: Something amazing': 'See website for: Something amazing',
-    '.. seealso:: Troublesome multiline\n Stuff goes htere': 'See website for: Troublesome multiline\n Stuff goes htere',
+    'yolo :ref:`my boy` does stuff': 'yolo `my boy` does stuff',
+    '.. seealso:: Something amazing': 'See also: Something amazing',
+    '.. seealso:: Troublesome multiline\n Stuff goes htere': 'See also: Troublesome multiline\n Stuff goes htere',
     '.. note:: boring stuff': 'Note: boring stuff',
 }
 
@@ -111,3 +112,20 @@ def test_rolemixin__build_doc_no_filter_match():
     fqcn, doc = obj._build_doc(role_name, path, collection_name, argspec, entrypoint_filter)
     assert fqcn == '.'.join([collection_name, role_name])
     assert doc is None
+
+
+def test_builtin_modules_list():
+    args = ['ansible-doc', '-l', 'ansible.builtin', '-t', 'module']
+    obj = DocCLI(args=args)
+    obj.parse()
+    init_plugin_loader()
+    result = obj._list_plugins('module', module_loader)
+    assert len(result) > 0
+
+
+def test_legacy_modules_list():
+    args = ['ansible-doc', '-l', 'ansible.legacy', '-t', 'module']
+    obj = DocCLI(args=args)
+    obj.parse()
+    result = obj._list_plugins('module', module_loader)
+    assert len(result) > 0

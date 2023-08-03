@@ -14,7 +14,6 @@ import stat
 import subprocess
 import tempfile
 import yaml
-from pprint import pprint
 from optparse import OptionParser
 from jinja2 import Environment
 
@@ -364,9 +363,9 @@ class VarTestMaker(object):
             block_wrapper = [debug_task, test_task]
 
         if 'include_params' in self.features:
-            self.tasks.append(dict(name='including tasks', include='included_tasks.yml', vars=dict(findme='include_params')))
+            self.tasks.append(dict(name='including tasks', include_tasks='included_tasks.yml', vars=dict(findme='include_params')))
         else:
-            self.tasks.append(dict(include='included_tasks.yml'))
+            self.tasks.append(dict(include_tasks='included_tasks.yml'))
 
         fname = os.path.join(TESTDIR, 'included_tasks.yml')
         with open(fname, 'w') as f:

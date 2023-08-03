@@ -453,7 +453,7 @@ class TestComplexOptions:
            'bar1': None, 'bar2': None, 'bar3': None, 'bar4': None}]
          ),
         # Check for elements in sub-options
-        ({"foobar": [{"foo": "good", "bam": "required_one_of", "bar1": [1, "good", "yes"], "bar2": ['1', 1], "bar3":['1.3', 1.3, 1]}]},
+        ({"foobar": [{"foo": "good", "bam": "required_one_of", "bar1": [1, "good", "yes"], "bar2": ['1', 1], "bar3": ['1.3', 1.3, 1]}]},
          [{'foo': 'good', 'bam1': None, 'bam2': 'test', 'bam3': None, 'bam4': None, 'bar': None, 'baz': None, 'bam': 'required_one_of',
            'bar1': ["1", "good", "yes"], 'bar2': [1, 1], 'bar3': [1.3, 1.3, 1.0], 'bar4': None}]
          ),
@@ -709,3 +709,16 @@ def test_no_log_none(stdin, capfd):
     # makes it into am.no_log_values. Instead we can check for the warning
     # emitted by am._log_invocation.
     assert len(get_warning_messages()) > 0
+
+
+@pytest.mark.parametrize("stdin", [{"pass": "testing"}], indirect=["stdin"])
+def test_no_log_alias(stdin, capfd):
+    """Given module parameters that use an alias for a parameter that matches
+    PASSWORD_MATCH and has no_log=True set, a warning should not be issued.
+    """
+    arg_spec = {
+        "other_pass": {"no_log": True, "aliases": ["pass"]},
+    }
+    am = basic.AnsibleModule(arg_spec)
+
+    assert len(get_warning_messages()) == 0

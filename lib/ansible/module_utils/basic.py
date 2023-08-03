@@ -5,6 +5,21 @@
 from __future__ import absolute_import, division, print_function
 __metaclass__ = type
 
+import sys
+
+# Used for determining if the system is running a new enough python version
+# and should only restrict on our documented minimum versions
+_PY3_MIN = sys.version_info >= (3, 6)
+_PY2_MIN = (2, 7) <= sys.version_info < (3,)
+_PY_MIN = _PY3_MIN or _PY2_MIN
+
+if not _PY_MIN:
+    print(
+        '\n{"failed": true, '
+        '"msg": "ansible-core requires a minimum of Python2 version 2.7 or Python3 version 3.6. Current version: %s"}' % ''.join(sys.version.splitlines())
+    )
+    sys.exit(1)
+
 FILE_ATTRIBUTES = {
     'A': 'noatime',
     'a': 'append',
@@ -49,7 +64,6 @@ import shutil
 import signal
 import stat
 import subprocess
-import sys
 import tempfile
 import time
 import traceback
@@ -64,16 +78,18 @@ except ImportError:
     HAS_SYSLOG = False
 
 try:
-    from systemd import journal
+    from systemd import journal, daemon as systemd_daemon
     # Makes sure that systemd.journal has method sendv()
     # Double check that journal has method sendv (some packages don't)
-    has_journal = hasattr(journal, 'sendv')
-except ImportError:
+    # check if the system is running under systemd
+    has_journal = hasattr(journal, 'sendv') and systemd_daemon.booted()
+except (ImportError, AttributeError):
+    # AttributeError would be caused from use of .booted() if wrong systemd
     has_journal = False
 
 HAVE_SELINUX = False
 try:
-    import ansible.module_utils.compat.selinux as selinux
+    from ansible.module_utils.compat import selinux
     HAVE_SELINUX = True
 except ImportError:
     pass
@@ -99,48 +115,55 @@ from ansible.module_utils.common.text.formatters import (
     SIZE_RANGES,
 )
 
+import hashlib
+
+
+def _get_available_hash_algorithms():
+    """Return a dictionary of available hash function names and their associated function."""
+    try:
+        # Algorithms available in Python 2.7.9+ and Python 3.2+
+        # https://docs.python.org/2.7/library/hashlib.html#hashlib.algorithms_available
+        # https://docs.python.org/3.2/library/hashlib.html#hashlib.algorithms_available
+        algorithm_names = hashlib.algorithms_available
+    except AttributeError:
+        # Algorithms in Python 2.7.x (used only for Python 2.7.0 through 2.7.8)
+        # https://docs.python.org/2.7/library/hashlib.html#hashlib.hashlib.algorithms
+        algorithm_names = set(hashlib.algorithms)
+
+    algorithms = {}
+
+    for algorithm_name in algorithm_names:
+        algorithm_func = getattr(hashlib, algorithm_name, None)
+
+        if algorithm_func:
+            try:
+                # Make sure the algorithm is actually available for use.
+                # Not all algorithms listed as available are actually usable.
+                # For example, md5 is not available in FIPS mode.
+                algorithm_func()
+            except Exception:
+                pass
+            else:
+                algorithms[algorithm_name] = algorithm_func
+
+    return algorithms
+
+
+AVAILABLE_HASH_ALGORITHMS = _get_available_hash_algorithms()
+
 try:
     from ansible.module_utils.common._json_compat import json
 except ImportError as e:
     print('\n{{"msg": "Error: ansible requires the stdlib json: {0}", "failed": true}}'.format(to_native(e)))
     sys.exit(1)
 
-
-AVAILABLE_HASH_ALGORITHMS = dict()
-try:
-    import hashlib
-
-    # python 2.7.9+ and 2.7.0+
-    for attribute in ('available_algorithms', 'algorithms'):
-        algorithms = getattr(hashlib, attribute, None)
-        if algorithms:
-            break
-    if algorithms is None:
-        # python 2.5+
-        algorithms = ('md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512')
-    for algorithm in algorithms:
-        AVAILABLE_HASH_ALGORITHMS[algorithm] = getattr(hashlib, algorithm)
-
-    # we may have been able to import md5 but it could still not be available
-    try:
-        hashlib.md5()
-    except ValueError:
-        AVAILABLE_HASH_ALGORITHMS.pop('md5', None)
-except Exception:
-    import sha
-    AVAILABLE_HASH_ALGORITHMS = {'sha1': sha.sha}
-    try:
-        import md5
-        AVAILABLE_HASH_ALGORITHMS['md5'] = md5.md5
-    except Exception:
-        pass
-
-from ansible.module_utils.common._collections_compat import (
+from ansible.module_utils.six.moves.collections_abc import (
     KeysView,
     Mapping, MutableMapping,
     Sequence, MutableSequence,
     Set, MutableSet,
 )
+from ansible.module_utils.common.locale import get_best_parsable_locale
 from ansible.module_utils.common.process import get_bin_path
 from ansible.module_utils.common.file import (
     _PERM_BITS as PERM_BITS,
@@ -200,14 +223,14 @@ imap = map
 
 try:
     # Python 2
-    unicode
+    unicode  # type: ignore[used-before-def]  # pylint: disable=used-before-assignment
 except NameError:
     # Python 3
     unicode = text_type
 
 try:
     # Python 2
-    basestring
+    basestring  # type: ignore[used-before-def,has-type]  # pylint: disable=used-before-assignment
 except NameError:
     # Python 3
     basestring = string_types
@@ -242,28 +265,8 @@ PASSWD_ARG_RE = re.compile(r'^[-]{0,2}pass[-]?(word|wd)?')
 
 # Used for parsing symbolic file perms
 MODE_OPERATOR_RE = re.compile(r'[+=-]')
-USERS_RE = re.compile(r'[^ugo]')
-PERMS_RE = re.compile(r'[^rwxXstugo]')
-
-# Used for determining if the system is running a new enough python version
-# and should only restrict on our documented minimum versions
-_PY3_MIN = sys.version_info[:2] >= (3, 5)
-_PY2_MIN = (2, 6) <= sys.version_info[:2] < (3,)
-_PY26 = (2, 6) == sys.version_info[:2]
-_PY_MIN = _PY3_MIN or _PY2_MIN
-if not _PY_MIN:
-    print(
-        '\n{"failed": true, '
-        '"msg": "ansible-core requires a minimum of Python2 version 2.6 or Python3 version 3.5. Current version: %s"}' % ''.join(sys.version.splitlines())
-    )
-    sys.exit(1)
-
-if _PY26:
-    deprecate(
-        'ansible-core 2.13 will require Python 2.7 or newer on the target. '
-        'Current version: %s' % ''.join(sys.version.splitlines()),
-        version='2.13',
-    )
+USERS_RE = re.compile(r'^[ugo]+$')
+PERMS_RE = re.compile(r'^[rwxXstugo]*$')
 
 
 #
@@ -349,7 +352,7 @@ def heuristic_log_sanitize(data, no_log_values=None):
                 if begin == 0:
                     # Searched the whole string so there's no password
                     # here.  Return the remaining data
-                    output.insert(0, data[0:begin])
+                    output.insert(0, data[0:prev_begin])
                     break
                 # Search for a different beginning of the password field.
                 sep_search_end = begin
@@ -507,6 +510,7 @@ class AnsibleModule(object):
         self.validation_result = self.validator.validate(self.params)
         self.params.update(self.validation_result.validated_parameters)
         self.no_log_values.update(self.validation_result._no_log_values)
+        self.aliases.update(self.validation_result._aliases)
 
         try:
             error = self.validation_result.errors[0]
@@ -1059,18 +1063,18 @@ class AnsibleModule(object):
 
             # Check if there are illegal characters in the user list
             # They can end up in 'users' because they are not split
-            if USERS_RE.match(users):
+            if not USERS_RE.match(users):
                 raise ValueError("bad symbolic permission for mode: %s" % mode)
 
             # Now we have two list of equal length, one contains the requested
             # permissions and one with the corresponding operators.
             for idx, perms in enumerate(permlist):
                 # Check if there are illegal characters in the permissions
-                if PERMS_RE.match(perms):
+                if not PERMS_RE.match(perms):
                     raise ValueError("bad symbolic permission for mode: %s" % mode)
 
                 for user in users:
-                    mode_to_apply = cls._get_octal_mode_from_symbolic_perms(path_stat, user, perms, use_umask)
+                    mode_to_apply = cls._get_octal_mode_from_symbolic_perms(path_stat, user, perms, use_umask, new_mode)
                     new_mode = cls._apply_operation_to_mode(user, opers[idx], mode_to_apply, new_mode)
 
         return new_mode
@@ -1095,9 +1099,9 @@ class AnsibleModule(object):
         return new_mode
 
     @staticmethod
-    def _get_octal_mode_from_symbolic_perms(path_stat, user, perms, use_umask):
-        prev_mode = stat.S_IMODE(path_stat.st_mode)
-
+    def _get_octal_mode_from_symbolic_perms(path_stat, user, perms, use_umask, prev_mode=None):
+        if prev_mode is None:
+            prev_mode = stat.S_IMODE(path_stat.st_mode)
         is_directory = stat.S_ISDIR(path_stat.st_mode)
         has_x_permissions = (prev_mode & EXEC_PERM_BITS) > 0
         apply_X_permission = is_directory or has_x_permissions
@@ -1110,7 +1114,7 @@ class AnsibleModule(object):
         rev_umask = umask ^ PERM_BITS
 
         # Permission bits constants documented at:
-        # http://docs.python.org/2/library/stat.html#stat.S_ISUID
+        # https://docs.python.org/3/library/stat.html#stat.S_ISUID
         if apply_X_permission:
             X_perms = {
                 'u': {'X': stat.S_IXUSR},
@@ -1241,13 +1245,16 @@ class AnsibleModule(object):
             # as it would be returned by locale.getdefaultlocale()
             locale.setlocale(locale.LC_ALL, '')
         except locale.Error:
-            # fallback to the 'C' locale, which may cause unicode
-            # issues but is preferable to simply failing because
-            # of an unknown locale
-            locale.setlocale(locale.LC_ALL, 'C')
-            os.environ['LANG'] = 'C'
-            os.environ['LC_ALL'] = 'C'
-            os.environ['LC_MESSAGES'] = 'C'
+            # fallback to the 'best' locale, per the function
+            # final fallback is 'C', which may cause unicode issues
+            # but is preferable to simply failing on unknown locale
+            best_locale = get_best_parsable_locale(self)
+
+            # need to set several since many tools choose to ignore documented precedence and scope
+            locale.setlocale(locale.LC_ALL, best_locale)
+            os.environ['LANG'] = best_locale
+            os.environ['LC_ALL'] = best_locale
+            os.environ['LC_MESSAGES'] = best_locale
         except Exception as e:
             self.fail_json(msg="An unknown error was encountered while attempting to validate the locale: %s" %
                            to_native(e), exception=traceback.format_exc())
@@ -1708,14 +1715,6 @@ class AnsibleModule(object):
                     tmp_dest_fd, tmp_dest_name = tempfile.mkstemp(prefix=b'.ansible_tmp', dir=b_dest_dir, suffix=b_suffix)
                 except (OSError, IOError) as e:
                     error_msg = 'The destination directory (%s) is not writable by the current user. Error was: %s' % (os.path.dirname(dest), to_native(e))
-                except TypeError:
-                    # We expect that this is happening because python3.4.x and
-                    # below can't handle byte strings in mkstemp().
-                    # Traceback would end in something like:
-                    #     file = _os.path.join(dir, pre + name + suf)
-                    # TypeError: can't concat bytes to str
-                    error_msg = ('Failed creating tmp file for atomic move.  This usually happens when using Python3 less than Python3.5. '
-                                 'Please use Python2.x or Python3.5 or greater.')
                 finally:
                     if error_msg:
                         if unsafe_writes:
@@ -1841,7 +1840,7 @@ class AnsibleModule(object):
 
     def run_command(self, args, check_rc=False, close_fds=True, executable=None, data=None, binary_data=False, path_prefix=None, cwd=None,
                     use_unsafe_shell=False, prompt_regex=None, environ_update=None, umask=None, encoding='utf-8', errors='surrogate_or_strict',
-                    expand_user_and_vars=True, pass_fds=None, before_communicate_callback=None, ignore_invalid_cwd=True):
+                    expand_user_and_vars=True, pass_fds=None, before_communicate_callback=None, ignore_invalid_cwd=True, handle_exceptions=True):
         '''
         Execute a command, returns rc, stdout, and stderr.
 
@@ -1863,7 +1862,7 @@ class AnsibleModule(object):
         :kw prompt_regex: Regex string (not a compiled regex) which can be
             used to detect prompts in the stdout which would otherwise cause
             the execution to hang (especially if no input data is specified)
-        :kw environ_update: dictionary to *update* os.environ with
+        :kw environ_update: dictionary to *update* environ variables with
         :kw umask: Umask to be used when running the command. Default None
         :kw encoding: Since we return native strings, on python3 we need to
             know the encoding to use to transform from bytes to text.  If you
@@ -1895,6 +1894,9 @@ class AnsibleModule(object):
         :kw ignore_invalid_cwd: This flag indicates whether an invalid ``cwd``
             (non-existent or not a directory) should be ignored or should raise
             an exception.
+        :kw handle_exceptions: This flag indicates whether an exception will
+            be handled inline and issue a failed_json or if the caller should
+            handle it.
         :returns: A 3-tuple of return code (integer), stdout (native string),
             and stderr (native string).  On python2, stdout and stderr are both
             byte strings.  On python3, stdout and stderr are text strings converted
@@ -1958,23 +1960,16 @@ class AnsibleModule(object):
         msg = None
         st_in = None
 
-        # Manipulate the environ we'll send to the new process
-        old_env_vals = {}
+        env = os.environ.copy()
         # We can set this from both an attribute and per call
-        for key, val in self.run_command_environ_update.items():
-            old_env_vals[key] = os.environ.get(key, None)
-            os.environ[key] = val
-        if environ_update:
-            for key, val in environ_update.items():
-                old_env_vals[key] = os.environ.get(key, None)
-                os.environ[key] = val
+        env.update(self.run_command_environ_update or {})
+        env.update(environ_update or {})
         if path_prefix:
-            path = os.environ.get('PATH', '')
-            old_env_vals['PATH'] = path
+            path = env.get('PATH', '')
             if path:
-                os.environ['PATH'] = "%s:%s" % (path_prefix, path)
+                env['PATH'] = "%s:%s" % (path_prefix, path)
             else:
-                os.environ['PATH'] = path_prefix
+                env['PATH'] = path_prefix
 
         # If using test-module.py and explode, the remote lib path will resemble:
         #   /tmp/test_module_scratch/debug_dir/ansible/module_utils/basic.py
@@ -1982,17 +1977,21 @@ class AnsibleModule(object):
         #   /tmp/ansible_vmweLQ/ansible_modlib.zip/ansible/module_utils/basic.py
 
         # Clean out python paths set by ansiballz
-        if 'PYTHONPATH' in os.environ:
-            pypaths = os.environ['PYTHONPATH'].split(':')
-            pypaths = [x for x in pypaths
-                       if not x.endswith('/ansible_modlib.zip') and
+        if 'PYTHONPATH' in env:
+            pypaths = [x for x in env['PYTHONPATH'].split(':')
+                       if x and
+                       not x.endswith('/ansible_modlib.zip') and
                        not x.endswith('/debug_dir')]
-            os.environ['PYTHONPATH'] = ':'.join(pypaths)
-            if not os.environ['PYTHONPATH']:
-                del os.environ['PYTHONPATH']
+            if pypaths and any(pypaths):
+                env['PYTHONPATH'] = ':'.join(pypaths)
 
         if data:
             st_in = subprocess.PIPE
+
+        def preexec():
+            self._restore_signal_handlers()
+            if umask:
+                os.umask(umask)
 
         kwargs = dict(
             executable=executable,
@@ -2001,32 +2000,21 @@ class AnsibleModule(object):
             stdin=st_in,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            preexec_fn=self._restore_signal_handlers,
+            preexec_fn=preexec,
+            env=env,
         )
         if PY3 and pass_fds:
             kwargs["pass_fds"] = pass_fds
         elif PY2 and pass_fds:
             kwargs['close_fds'] = False
 
-        # store the pwd
-        prev_dir = os.getcwd()
-
         # make sure we're in the right working directory
         if cwd:
+            cwd = to_bytes(os.path.abspath(os.path.expanduser(cwd)), errors='surrogate_or_strict')
             if os.path.isdir(cwd):
-                cwd = to_bytes(os.path.abspath(os.path.expanduser(cwd)), errors='surrogate_or_strict')
                 kwargs['cwd'] = cwd
-                try:
-                    os.chdir(cwd)
-                except (OSError, IOError) as e:
-                    self.fail_json(rc=e.errno, msg="Could not chdir to %s, %s" % (cwd, to_native(e)),
-                                   exception=traceback.format_exc())
             elif not ignore_invalid_cwd:
                 self.fail_json(msg="Provided cwd is not a valid directory: %s" % cwd)
-
-        old_umask = None
-        if umask:
-            old_umask = os.umask(umask)
 
         try:
             if self._debug:
@@ -2047,78 +2035,77 @@ class AnsibleModule(object):
                 # Select PollSelector which is supported by major platforms
                 selector = selectors.PollSelector()
 
-            selector.register(cmd.stdout, selectors.EVENT_READ)
-            selector.register(cmd.stderr, selectors.EVENT_READ)
-            if os.name == 'posix':
-                fcntl.fcntl(cmd.stdout.fileno(), fcntl.F_SETFL, fcntl.fcntl(cmd.stdout.fileno(), fcntl.F_GETFL) | os.O_NONBLOCK)
-                fcntl.fcntl(cmd.stderr.fileno(), fcntl.F_SETFL, fcntl.fcntl(cmd.stderr.fileno(), fcntl.F_GETFL) | os.O_NONBLOCK)
-
             if data:
                 if not binary_data:
                     data += '\n'
                 if isinstance(data, text_type):
                     data = to_bytes(data)
-                cmd.stdin.write(data)
-                cmd.stdin.close()
 
-            while True:
-                events = selector.select(1)
-                for key, event in events:
-                    b_chunk = key.fileobj.read()
-                    if b_chunk == b(''):
-                        selector.unregister(key.fileobj)
-                    if key.fileobj == cmd.stdout:
-                        stdout += b_chunk
-                    elif key.fileobj == cmd.stderr:
-                        stderr += b_chunk
-                # if we're checking for prompts, do it now
-                if prompt_re:
-                    if prompt_re.search(stdout) and not data:
-                        if encoding:
-                            stdout = to_native(stdout, encoding=encoding, errors=errors)
-                        return (257, stdout, "A prompt was encountered while running a command, but no input data was specified")
-                # only break out if no pipes are left to read or
-                # the pipes are completely read and
-                # the process is terminated
-                if (not events or not selector.get_map()) and cmd.poll() is not None:
-                    break
-                # No pipes are left to read but process is not yet terminated
-                # Only then it is safe to wait for the process to be finished
-                # NOTE: Actually cmd.poll() is always None here if no selectors are left
-                elif not selector.get_map() and cmd.poll() is None:
-                    cmd.wait()
-                    # The process is terminated. Since no pipes to read from are
-                    # left, there is no need to call select() again.
-                    break
+            if not prompt_re:
+                stdout, stderr = cmd.communicate(input=data)
+            else:
+                # We only need this to look for a prompt, to abort instead of hanging
+                selector.register(cmd.stdout, selectors.EVENT_READ)
+                selector.register(cmd.stderr, selectors.EVENT_READ)
+                if os.name == 'posix':
+                    fcntl.fcntl(cmd.stdout.fileno(), fcntl.F_SETFL, fcntl.fcntl(cmd.stdout.fileno(), fcntl.F_GETFL) | os.O_NONBLOCK)
+                    fcntl.fcntl(cmd.stderr.fileno(), fcntl.F_SETFL, fcntl.fcntl(cmd.stderr.fileno(), fcntl.F_GETFL) | os.O_NONBLOCK)
 
-            cmd.stdout.close()
-            cmd.stderr.close()
-            selector.close()
+                if data:
+                    cmd.stdin.write(data)
+                    cmd.stdin.close()
+
+                while True:
+                    events = selector.select(1)
+                    for key, event in events:
+                        b_chunk = key.fileobj.read()
+                        if b_chunk == b(''):
+                            selector.unregister(key.fileobj)
+                        if key.fileobj == cmd.stdout:
+                            stdout += b_chunk
+                        elif key.fileobj == cmd.stderr:
+                            stderr += b_chunk
+                    # if we're checking for prompts, do it now
+                    if prompt_re:
+                        if prompt_re.search(stdout) and not data:
+                            if encoding:
+                                stdout = to_native(stdout, encoding=encoding, errors=errors)
+                            return (257, stdout, "A prompt was encountered while running a command, but no input data was specified")
+                    # only break out if no pipes are left to read or
+                    # the pipes are completely read and
+                    # the process is terminated
+                    if (not events or not selector.get_map()) and cmd.poll() is not None:
+                        break
+                    # No pipes are left to read but process is not yet terminated
+                    # Only then it is safe to wait for the process to be finished
+                    # NOTE: Actually cmd.poll() is always None here if no selectors are left
+                    elif not selector.get_map() and cmd.poll() is None:
+                        cmd.wait()
+                        # The process is terminated. Since no pipes to read from are
+                        # left, there is no need to call select() again.
+                        break
+
+                cmd.stdout.close()
+                cmd.stderr.close()
+                selector.close()
 
             rc = cmd.returncode
         except (OSError, IOError) as e:
             self.log("Error Executing CMD:%s Exception:%s" % (self._clean_args(args), to_native(e)))
-            self.fail_json(rc=e.errno, stdout=b'', stderr=b'', msg=to_native(e), cmd=self._clean_args(args))
+            if handle_exceptions:
+                self.fail_json(rc=e.errno, stdout=b'', stderr=b'', msg=to_native(e), cmd=self._clean_args(args))
+            else:
+                raise e
         except Exception as e:
             self.log("Error Executing CMD:%s Exception:%s" % (self._clean_args(args), to_native(traceback.format_exc())))
-            self.fail_json(rc=257, stdout=b'', stderr=b'', msg=to_native(e), exception=traceback.format_exc(), cmd=self._clean_args(args))
-
-        # Restore env settings
-        for key, val in old_env_vals.items():
-            if val is None:
-                del os.environ[key]
+            if handle_exceptions:
+                self.fail_json(rc=257, stdout=b'', stderr=b'', msg=to_native(e), exception=traceback.format_exc(), cmd=self._clean_args(args))
             else:
-                os.environ[key] = val
-
-        if old_umask:
-            os.umask(old_umask)
+                raise e
 
         if rc != 0 and check_rc:
             msg = heuristic_log_sanitize(stderr.rstrip(), self.no_log_values)
             self.fail_json(cmd=self._clean_args(args), rc=rc, stdout=stdout, stderr=stderr, msg=msg)
-
-        # reset the pwd
-        os.chdir(prev_dir)
 
         if encoding is not None:
             return (rc, to_native(stdout, encoding=encoding, errors=errors),

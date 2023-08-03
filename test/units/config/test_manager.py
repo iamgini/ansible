@@ -10,7 +10,7 @@ import os
 import os.path
 import pytest
 
-from ansible.config.manager import ConfigManager, Setting, ensure_type, resolve_path, get_config_type
+from ansible.config.manager import ConfigManager, ensure_type, resolve_path, get_config_type
 from ansible.errors import AnsibleOptionsError, AnsibleError
 from ansible.module_utils.six import integer_types, string_types
 from ansible.parsing.yaml.objects import AnsibleVaultEncryptedUnicode
@@ -18,16 +18,7 @@ from ansible.parsing.yaml.objects import AnsibleVaultEncryptedUnicode
 curdir = os.path.dirname(__file__)
 cfg_file = os.path.join(curdir, 'test.cfg')
 cfg_file2 = os.path.join(curdir, 'test2.cfg')
-
-expected_ini = {'CONFIG_FILE': Setting(name='CONFIG_FILE', value=cfg_file, origin='', type='string'),
-                'config_entry': Setting(name='config_entry', value=u'fromini', origin=cfg_file, type='string'),
-                'config_entry_bool': Setting(name='config_entry_bool', value=False, origin=cfg_file, type='bool'),
-                'config_entry_list': Setting(name='config_entry_list', value=['fromini'], origin=cfg_file, type='list'),
-                'config_entry_deprecated': Setting(name='config_entry_deprecated', value=u'fromini', origin=cfg_file, type='string'),
-                'config_entry_multi': Setting(name='config_entry_multi', value=u'morefromini', origin=cfg_file, type='string'),
-                'config_entry_multi_deprecated': Setting(name='config_entry_multi_deprecated', value=u'morefromini', origin=cfg_file, type='string'),
-                'config_entry_multi_deprecated_source': Setting(name='config_entry_multi_deprecated_source', value=u'morefromini',
-                                                                origin=cfg_file, type='string')}
+cfg_file3 = os.path.join(curdir, 'test3.cfg')
 
 ensure_test_data = [
     ('a,b', 'list', list),
@@ -75,6 +66,15 @@ ensure_test_data = [
     ('None', 'none', type(None))
 ]
 
+ensure_unquoting_test_data = [
+    ('"value"', '"value"', 'str', 'env'),
+    ('"value"', '"value"', 'str', 'yaml'),
+    ('"value"', 'value', 'str', 'ini'),
+    ('\'value\'', 'value', 'str', 'ini'),
+    ('\'\'value\'\'', '\'value\'', 'str', 'ini'),
+    ('""value""', '"value"', 'str', 'ini')
+]
+
 
 class TestConfigManager:
     @classmethod
@@ -85,12 +85,14 @@ class TestConfigManager:
     def teardown_class(cls):
         cls.manager = None
 
-    def test_initial_load(self):
-        assert self.manager.data._global_settings == expected_ini
-
     @pytest.mark.parametrize("value, expected_type, python_type", ensure_test_data)
     def test_ensure_type(self, value, expected_type, python_type):
         assert isinstance(ensure_type(value, expected_type), python_type)
+
+    @pytest.mark.parametrize("value, expected_value, value_type, origin", ensure_unquoting_test_data)
+    def test_ensure_type_unquoting(self, value, expected_value, value_type, origin):
+        actual_value = ensure_type(value, value_type, origin)
+        assert actual_value == expected_value
 
     def test_resolve_path(self):
         assert os.path.join(curdir, 'test.yml') == resolve_path('./test.yml', cfg_file)
@@ -155,3 +157,16 @@ class TestConfigManager:
 
         actual_value = ensure_type(vault_var, value_type)
         assert actual_value == "vault text"
+
+
+@pytest.mark.parametrize(("key", "expected_value"), (
+    ("COLOR_UNREACHABLE", "bright red"),
+    ("COLOR_VERBOSE", "rgb013"),
+    ("COLOR_DEBUG", "gray10")))
+def test_256color_support(key, expected_value):
+    # GIVEN: a config file containing 256-color values with default definitions
+    manager = ConfigManager(cfg_file3)
+    # WHEN: get config values
+    actual_value = manager.get_config_value(key)
+    # THEN: no error
+    assert actual_value == expected_value

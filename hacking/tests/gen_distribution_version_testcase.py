@@ -19,7 +19,7 @@ import subprocess
 import sys
 
 from ansible.module_utils import distro
-from ansible.module_utils._text import to_text
+from ansible.module_utils.common.text.converters import to_text
 
 
 filelist = [
@@ -41,7 +41,6 @@ filelist = [
     '/etc/altlinux-release',
     '/etc/os-release',
     '/etc/coreos/update.conf',
-    '/etc/flatcar/update.conf',
     '/usr/lib/os-release',
 ]
 
@@ -54,7 +53,7 @@ for f in filelist:
             with open(f) as fh:
                 fcont[f] = fh.read()
 
-dist = distro.linux_distribution(full_distribution_name=False)
+dist = (distro.id(), distro.version(), distro.codename())
 
 facts = ['distribution', 'distribution_version', 'distribution_release', 'distribution_major_version', 'os_family']
 

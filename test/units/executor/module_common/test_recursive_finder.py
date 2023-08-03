@@ -29,7 +29,7 @@ from io import BytesIO
 import ansible.errors
 
 from ansible.executor.module_common import recursive_finder
-
+from ansible.plugins.loader import init_plugin_loader
 
 # These are the modules that are brought in by module_utils/basic.py  This may need to be updated
 # when basic.py gains new imports
@@ -42,7 +42,6 @@ MODULE_UTILS_BASIC_FILES = frozenset(('ansible/__init__.py',
                                       'ansible/module_utils/basic.py',
                                       'ansible/module_utils/six/__init__.py',
                                       'ansible/module_utils/_text.py',
-                                      'ansible/module_utils/common/_collections_compat.py',
                                       'ansible/module_utils/common/_json_compat.py',
                                       'ansible/module_utils/common/collections.py',
                                       'ansible/module_utils/common/parameters.py',
@@ -50,6 +49,7 @@ MODULE_UTILS_BASIC_FILES = frozenset(('ansible/__init__.py',
                                       'ansible/module_utils/parsing/convert_bool.py',
                                       'ansible/module_utils/common/__init__.py',
                                       'ansible/module_utils/common/file.py',
+                                      'ansible/module_utils/common/locale.py',
                                       'ansible/module_utils/common/process.py',
                                       'ansible/module_utils/common/sys_info.py',
                                       'ansible/module_utils/common/text/__init__.py',
@@ -78,6 +78,8 @@ ANSIBLE_LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.pa
 
 @pytest.fixture
 def finder_containers():
+    init_plugin_loader()
+
     FinderContainers = namedtuple('FinderContainers', ['zf'])
 
     zipoutput = BytesIO()

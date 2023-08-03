@@ -18,36 +18,42 @@
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
+try:
+    import curses
+except ImportError:
+    HAS_CURSES = False
+else:
+    # this will be set to False if curses.setupterm() fails
+    HAS_CURSES = True
+
+import codecs
 import ctypes.util
-import errno
 import fcntl
 import getpass
-import locale
+import io
 import logging
 import os
 import random
 import subprocess
 import sys
+import termios
 import textwrap
+import threading
 import time
+import tty
+import typing as t
 
+from functools import wraps
 from struct import unpack, pack
-from termios import TIOCGWINSZ
 
 from ansible import constants as C
-from ansible.errors import AnsibleError, AnsibleAssertionError
-from ansible.module_utils._text import to_bytes, to_text, to_native
-from ansible.module_utils.six import with_metaclass, text_type
+from ansible.errors import AnsibleError, AnsibleAssertionError, AnsiblePromptInterrupt, AnsiblePromptNoninteractive
+from ansible.module_utils.common.text.converters import to_bytes, to_text
+from ansible.module_utils.six import text_type
 from ansible.utils.color import stringc
+from ansible.utils.multiprocessing import context as multiprocessing_context
 from ansible.utils.singleton import Singleton
 from ansible.utils.unsafe_proxy import wrap_var
-
-try:
-    # Python 2
-    input = raw_input
-except NameError:
-    # Python 3, we already have raw_input
-    pass
 
 _LIBC = ctypes.cdll.LoadLibrary(ctypes.util.find_library('c'))
 # Set argtypes, to avoid segfault if the wrong type is provided,
@@ -57,23 +63,8 @@ _LIBC.wcswidth.argtypes = (ctypes.c_wchar_p, ctypes.c_int)
 # Max for c_int
 _MAX_INT = 2 ** (ctypes.sizeof(ctypes.c_int) * 8 - 1) - 1
 
-_LOCALE_INITIALIZED = False
-_LOCALE_INITIALIZATION_ERR = None
-
-
-def initialize_locale():
-    """Set the locale to the users default setting
-    and set ``_LOCALE_INITIALIZED`` to indicate whether
-    ``get_text_width`` may run into trouble
-    """
-    global _LOCALE_INITIALIZED, _LOCALE_INITIALIZATION_ERR
-    if _LOCALE_INITIALIZED is False:
-        try:
-            locale.setlocale(locale.LC_ALL, '')
-        except locale.Error as e:
-            _LOCALE_INITIALIZATION_ERR = e
-        else:
-            _LOCALE_INITIALIZED = True
+MOVE_TO_BOL = b'\r'
+CLEAR_TO_EOL = b'\x1b[K'
 
 
 def get_text_width(text):
@@ -82,26 +73,10 @@ def get_text_width(text):
 
     We try first with ``wcswidth``, and fallback to iterating each
     character and using wcwidth individually, falling back to a value of 0
-    for non-printable wide characters
-
-    On Py2, this depends on ``locale.setlocale(locale.LC_ALL, '')``,
-    that in the case of Ansible is done in ``bin/ansible``
+    for non-printable wide characters.
     """
     if not isinstance(text, text_type):
         raise TypeError('get_text_width requires text, not %s' % type(text))
-
-    if _LOCALE_INITIALIZATION_ERR:
-        Display().warning(
-            'An error occurred while calling ansible.utils.display.initialize_locale '
-            '(%s). This may result in incorrectly calculated text widths that can '
-            'cause Display to print incorrect line lengths' % _LOCALE_INITIALIZATION_ERR
-        )
-    elif not _LOCALE_INITIALIZED:
-        Display().warning(
-            'ansible.utils.display.initialize_locale has not been called, '
-            'this may result in incorrectly calculated text widths that can '
-            'cause Display to print incorrect line lengths'
-        )
 
     try:
         width = _LIBC.wcswidth(text, _MAX_INT)
@@ -134,14 +109,27 @@ def get_text_width(text):
             w = 0
         width += w
 
-    if width == 0 and counter and not _LOCALE_INITIALIZED:
+    if width == 0 and counter:
         raise EnvironmentError(
-            'ansible.utils.display.initialize_locale has not been called, '
-            'and get_text_width could not calculate text width of %r' % text
+            'get_text_width could not calculate text width of %r' % text
         )
 
     # It doesn't make sense to have a negative printable width
     return width if width >= 0 else 0
+
+
+def proxy_display(method):
+
+    def proxyit(self, *args, **kwargs):
+        if self._final_q:
+            # If _final_q is set, that means we are in a WorkerProcess
+            # and instead of displaying messages directly from the fork
+            # we will proxy them through the queue
+            return self._final_q.send_display(method.__name__, *args, **kwargs)
+        else:
+            return method(self, *args, **kwargs)
+
+    return proxyit
 
 
 class FilterBlackList(logging.Filter):
@@ -204,9 +192,90 @@ b_COW_PATHS = (
 )
 
 
-class Display(with_metaclass(Singleton, object)):
+def _synchronize_textiowrapper(tio, lock):
+    # Ensure that a background thread can't hold the internal buffer lock on a file object
+    # during a fork, which causes forked children to hang. We're using display's existing lock for
+    # convenience (and entering the lock before a fork).
+    def _wrap_with_lock(f, lock):
+        @wraps(f)
+        def locking_wrapper(*args, **kwargs):
+            with lock:
+                return f(*args, **kwargs)
+
+        return locking_wrapper
+
+    buffer = tio.buffer
+
+    # monkeypatching the underlying file-like object isn't great, but likely safer than subclassing
+    buffer.write = _wrap_with_lock(buffer.write, lock)
+    buffer.flush = _wrap_with_lock(buffer.flush, lock)
+
+
+def setraw(fd, when=termios.TCSAFLUSH):
+    """Put terminal into a raw mode.
+
+    Copied from ``tty`` from CPython 3.11.0, and modified to not remove OPOST from OFLAG
+
+    OPOST is kept to prevent an issue with multi line prompts from being corrupted now that display
+    is proxied via the queue from forks. The problem is a race condition, in that we proxy the display
+    over the fork, but before it can be displayed, this plugin will have continued executing, potentially
+    setting stdout and stdin to raw which remove output post processing that commonly converts NL to CRLF
+    """
+    mode = termios.tcgetattr(fd)
+    mode[tty.IFLAG] = mode[tty.IFLAG] & ~(termios.BRKINT | termios.ICRNL | termios.INPCK | termios.ISTRIP | termios.IXON)
+    mode[tty.OFLAG] = mode[tty.OFLAG] & ~(termios.OPOST)
+    mode[tty.CFLAG] = mode[tty.CFLAG] & ~(termios.CSIZE | termios.PARENB)
+    mode[tty.CFLAG] = mode[tty.CFLAG] | termios.CS8
+    mode[tty.LFLAG] = mode[tty.LFLAG] & ~(termios.ECHO | termios.ICANON | termios.IEXTEN | termios.ISIG)
+    mode[tty.CC][termios.VMIN] = 1
+    mode[tty.CC][termios.VTIME] = 0
+    termios.tcsetattr(fd, when, mode)
+
+
+def clear_line(stdout):
+    stdout.write(b'\x1b[%s' % MOVE_TO_BOL)
+    stdout.write(b'\x1b[%s' % CLEAR_TO_EOL)
+
+
+def setup_prompt(stdin_fd, stdout_fd, seconds, echo):
+    # type: (int, int, int, bool) -> None
+    setraw(stdin_fd)
+
+    # Only set stdout to raw mode if it is a TTY. This is needed when redirecting
+    # stdout to a file since a file cannot be set to raw mode.
+    if os.isatty(stdout_fd):
+        setraw(stdout_fd)
+
+    if echo:
+        new_settings = termios.tcgetattr(stdin_fd)
+        new_settings[3] = new_settings[3] | termios.ECHO
+        termios.tcsetattr(stdin_fd, termios.TCSANOW, new_settings)
+
+
+def setupterm():
+    # Nest the try except since curses.error is not available if curses did not import
+    try:
+        curses.setupterm()
+    except (curses.error, TypeError, io.UnsupportedOperation):
+        global HAS_CURSES
+        HAS_CURSES = False
+    else:
+        global MOVE_TO_BOL
+        global CLEAR_TO_EOL
+        # curses.tigetstr() returns None in some circumstances
+        MOVE_TO_BOL = curses.tigetstr('cr') or MOVE_TO_BOL
+        CLEAR_TO_EOL = curses.tigetstr('el') or CLEAR_TO_EOL
+
+
+class Display(metaclass=Singleton):
 
     def __init__(self, verbosity=0):
+
+        self._final_q = None
+
+        # NB: this lock is used to both prevent intermingled output between threads and to block writes during forks.
+        # Do not change the type of this lock or upgrade to a shared lock (eg multiprocessing.RLock).
+        self._lock = threading.RLock()
 
         self.columns = None
         self.verbosity = verbosity
@@ -225,7 +294,9 @@ class Display(with_metaclass(Singleton, object)):
             try:
                 cmd = subprocess.Popen([self.b_cowsay, "-l"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 (out, err) = cmd.communicate()
-                self.cows_available = set([to_text(c) for c in out.split()])
+                if cmd.returncode:
+                    raise Exception
+                self.cows_available = {to_text(c) for c in out.split()}  # set comprehension
                 if C.ANSIBLE_COW_ACCEPTLIST and any(C.ANSIBLE_COW_ACCEPTLIST):
                     self.cows_available = set(C.ANSIBLE_COW_ACCEPTLIST).intersection(self.cows_available)
             except Exception:
@@ -233,6 +304,41 @@ class Display(with_metaclass(Singleton, object)):
                 self.b_cowsay = False
 
         self._set_column_width()
+
+        try:
+            # NB: we're relying on the display singleton behavior to ensure this only runs once
+            _synchronize_textiowrapper(sys.stdout, self._lock)
+            _synchronize_textiowrapper(sys.stderr, self._lock)
+        except Exception as ex:
+            self.warning(f"failed to patch stdout/stderr for fork-safety: {ex}")
+
+        codecs.register_error('_replacing_warning_handler', self._replacing_warning_handler)
+        try:
+            sys.stdout.reconfigure(errors='_replacing_warning_handler')
+            sys.stderr.reconfigure(errors='_replacing_warning_handler')
+        except Exception as ex:
+            self.warning(f"failed to reconfigure stdout/stderr with custom encoding error handler: {ex}")
+
+        self.setup_curses = False
+
+    def _replacing_warning_handler(self, exception):
+        # TODO: This should probably be deferred until after the current display is completed
+        #       this will require some amount of new functionality
+        self.deprecated(
+            'Non UTF-8 encoded data replaced with "?" while displaying text to stdout/stderr, this is temporary and will become an error',
+            version='2.18',
+        )
+        return '?', exception.end
+
+    def set_queue(self, queue):
+        """Set the _final_q on Display, so that we know to proxy display over the queue
+        instead of directly writing to stdout/stderr from forks
+
+        This is only needed in ansible.executor.process.worker:WorkerProcess._run
+        """
+        if multiprocessing_context.parent_process() is None:
+            raise RuntimeError('queue cannot be set in parent process')
+        self._final_q = queue
 
     def set_cowsay_info(self):
         if C.ANSIBLE_NOCOWS:
@@ -245,11 +351,15 @@ class Display(with_metaclass(Singleton, object)):
                 if os.path.exists(b_cow_path):
                     self.b_cowsay = b_cow_path
 
+    @proxy_display
     def display(self, msg, color=None, stderr=False, screen_only=False, log_only=False, newline=True):
         """ Display a message to the user
 
         Note: msg *must* be a unicode string to prevent UnicodeError tracebacks.
         """
+
+        if not isinstance(msg, str):
+            raise TypeError(f'Display message must be str, not: {msg.__class__.__name__}')
 
         nocolor = msg
 
@@ -267,13 +377,6 @@ class Display(with_metaclass(Singleton, object)):
             if has_newline or newline:
                 msg2 = msg2 + u'\n'
 
-            msg2 = to_bytes(msg2, encoding=self._output_encoding(stderr=stderr))
-            if sys.version_info >= (3,):
-                # Convert back to text string on python3
-                # We first convert to a byte string so that we get rid of
-                # characters that are invalid in the user's locale
-                msg2 = to_text(msg2, self._output_encoding(stderr=stderr), errors='replace')
-
             # Note: After Display() class is refactored need to update the log capture
             # code in 'bin/ansible-connection' (and other relevant places).
             if not stderr:
@@ -281,24 +384,24 @@ class Display(with_metaclass(Singleton, object)):
             else:
                 fileobj = sys.stderr
 
-            fileobj.write(msg2)
+            with self._lock:
+                fileobj.write(msg2)
 
-            try:
-                fileobj.flush()
-            except IOError as e:
-                # Ignore EPIPE in case fileobj has been prematurely closed, eg.
-                # when piping to "head -n1"
-                if e.errno != errno.EPIPE:
-                    raise
+            # With locks, and the fact that we aren't printing from forks
+            # just write, and let the system flush. Everything should come out peachy
+            # I've left this code for historical purposes, or in case we need to add this
+            # back at a later date. For now ``TaskQueueManager.cleanup`` will perform a
+            # final flush at shutdown.
+            # try:
+            #     fileobj.flush()
+            # except IOError as e:
+            #     # Ignore EPIPE in case fileobj has been prematurely closed, eg.
+            #     # when piping to "head -n1"
+            #     if e.errno != errno.EPIPE:
+            #         raise
 
         if logger and not screen_only:
-            # We first convert to a byte string so that we get rid of
-            # color and characters that are invalid in the user's locale
-            msg2 = to_bytes(nocolor.lstrip(u'\n'))
-
-            if sys.version_info >= (3,):
-                # Convert back to text string on python3
-                msg2 = to_text(msg2, self._output_encoding(stderr=stderr))
+            msg2 = nocolor.lstrip('\n')
 
             lvl = logging.INFO
             if color:
@@ -380,6 +483,7 @@ class Display(with_metaclass(Singleton, object)):
 
         return message_text
 
+    @proxy_display
     def deprecated(self, msg, version=None, removed=False, date=None, collection_name=None):
         if not removed and not C.DEPRECATION_WARNINGS:
             return
@@ -396,6 +500,7 @@ class Display(with_metaclass(Singleton, object)):
             self.display(message_text.strip(), color=C.COLOR_DEPRECATE, stderr=True)
             self._deprecations[message_text] = 1
 
+    @proxy_display
     def warning(self, msg, formatted=False):
 
         if not formatted:
@@ -466,16 +571,10 @@ class Display(with_metaclass(Singleton, object)):
 
     @staticmethod
     def prompt(msg, private=False):
-        prompt_string = to_bytes(msg, encoding=Display._output_encoding())
-        if sys.version_info >= (3,):
-            # Convert back into text on python3.  We do this double conversion
-            # to get rid of characters that are illegal in the user's locale
-            prompt_string = to_text(prompt_string)
-
         if private:
-            return getpass.getpass(prompt_string)
+            return getpass.getpass(msg)
         else:
-            return input(prompt_string)
+            return input(msg)
 
     def do_var_prompt(self, varname, private=True, prompt=None, encrypt=None, confirm=False, salt_size=None, salt=None, default=None, unsafe=None):
 
@@ -520,19 +619,141 @@ class Display(with_metaclass(Singleton, object)):
             result = wrap_var(result)
         return result
 
-    @staticmethod
-    def _output_encoding(stderr=False):
-        encoding = locale.getpreferredencoding()
-        # https://bugs.python.org/issue6202
-        # Python2 hardcodes an obsolete value on Mac.  Use MacOSX defaults
-        # instead.
-        if encoding in ('mac-roman',):
-            encoding = 'utf-8'
-        return encoding
-
     def _set_column_width(self):
         if os.isatty(1):
-            tty_size = unpack('HHHH', fcntl.ioctl(1, TIOCGWINSZ, pack('HHHH', 0, 0, 0, 0)))[1]
+            tty_size = unpack('HHHH', fcntl.ioctl(1, termios.TIOCGWINSZ, pack('HHHH', 0, 0, 0, 0)))[1]
         else:
             tty_size = 0
         self.columns = max(79, tty_size - 1)
+
+    def prompt_until(self, msg, private=False, seconds=None, interrupt_input=None, complete_input=None):
+        if self._final_q:
+            from ansible.executor.process.worker import current_worker
+            self._final_q.send_prompt(
+                worker_id=current_worker.worker_id, prompt=msg, private=private, seconds=seconds,
+                interrupt_input=interrupt_input, complete_input=complete_input
+            )
+            return current_worker.worker_queue.get()
+
+        if HAS_CURSES and not self.setup_curses:
+            setupterm()
+            self.setup_curses = True
+
+        if (
+            self._stdin_fd is None
+            or not os.isatty(self._stdin_fd)
+            # Compare the current process group to the process group associated
+            # with terminal of the given file descriptor to determine if the process
+            # is running in the background.
+            or os.getpgrp() != os.tcgetpgrp(self._stdin_fd)
+        ):
+            raise AnsiblePromptNoninteractive('stdin is not interactive')
+
+        # When seconds/interrupt_input/complete_input are all None, this does mostly the same thing as input/getpass,
+        # but self.prompt may raise a KeyboardInterrupt, which must be caught in the main thread.
+        # If the main thread handled this, it would also need to send a newline to the tty of any hanging pids.
+        # if seconds is None and interrupt_input is None and complete_input is None:
+        #     try:
+        #         return self.prompt(msg, private=private)
+        #     except KeyboardInterrupt:
+        #         # can't catch in the results_thread_main daemon thread
+        #         raise AnsiblePromptInterrupt('user interrupt')
+
+        self.display(msg)
+        result = b''
+        with self._lock:
+            original_stdin_settings = termios.tcgetattr(self._stdin_fd)
+            try:
+                setup_prompt(self._stdin_fd, self._stdout_fd, seconds, not private)
+
+                # flush the buffer to make sure no previous key presses
+                # are read in below
+                termios.tcflush(self._stdin, termios.TCIFLUSH)
+
+                # read input 1 char at a time until the optional timeout or complete/interrupt condition is met
+                return self._read_non_blocking_stdin(echo=not private, seconds=seconds, interrupt_input=interrupt_input, complete_input=complete_input)
+            finally:
+                # restore the old settings for the duped stdin stdin_fd
+                termios.tcsetattr(self._stdin_fd, termios.TCSADRAIN, original_stdin_settings)
+
+    def _read_non_blocking_stdin(
+        self,
+        echo=False,  # type: bool
+        seconds=None,  # type: int
+        interrupt_input=None,  # type: t.Iterable[bytes]
+        complete_input=None,  # type: t.Iterable[bytes]
+    ):  # type: (...) -> bytes
+
+        if self._final_q:
+            raise NotImplementedError
+
+        if seconds is not None:
+            start = time.time()
+        if interrupt_input is None:
+            try:
+                interrupt = termios.tcgetattr(sys.stdin.buffer.fileno())[6][termios.VINTR]
+            except Exception:
+                interrupt = b'\x03'  # value for Ctrl+C
+
+        try:
+            backspace_sequences = [termios.tcgetattr(self._stdin_fd)[6][termios.VERASE]]
+        except Exception:
+            # unsupported/not present, use default
+            backspace_sequences = [b'\x7f', b'\x08']
+
+        result_string = b''
+        while seconds is None or (time.time() - start < seconds):
+            key_pressed = None
+            try:
+                os.set_blocking(self._stdin_fd, False)
+                while key_pressed is None and (seconds is None or (time.time() - start < seconds)):
+                    key_pressed = self._stdin.read(1)
+            finally:
+                os.set_blocking(self._stdin_fd, True)
+                if key_pressed is None:
+                    key_pressed = b''
+
+            if (interrupt_input is None and key_pressed == interrupt) or (interrupt_input is not None and key_pressed.lower() in interrupt_input):
+                clear_line(self._stdout)
+                raise AnsiblePromptInterrupt('user interrupt')
+            if (complete_input is None and key_pressed in (b'\r', b'\n')) or (complete_input is not None and key_pressed.lower() in complete_input):
+                clear_line(self._stdout)
+                break
+            elif key_pressed in backspace_sequences:
+                clear_line(self._stdout)
+                result_string = result_string[:-1]
+                if echo:
+                    self._stdout.write(result_string)
+                self._stdout.flush()
+            else:
+                result_string += key_pressed
+        return result_string
+
+    @property
+    def _stdin(self):
+        if self._final_q:
+            raise NotImplementedError
+        try:
+            return sys.stdin.buffer
+        except AttributeError:
+            return None
+
+    @property
+    def _stdin_fd(self):
+        try:
+            return self._stdin.fileno()
+        except (ValueError, AttributeError):
+            return None
+
+    @property
+    def _stdout(self):
+        if self._final_q:
+            raise NotImplementedError
+        return sys.stdout.buffer
+
+    @property
+    def _stdout_fd(self):
+        try:
+            return self._stdout.fileno()
+        except (ValueError, AttributeError):
+            return None
