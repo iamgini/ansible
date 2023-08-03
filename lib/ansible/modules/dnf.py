@@ -120,7 +120,7 @@ options:
     default: []
   skip_broken:
     description:
-      - Skip all unavailable packages or packages with broken dependencies
+      - Skip all packages with broken dependencies
         without raising an error. Equivalent to passing the --skip-broken option.
     type: bool
     default: "no"
